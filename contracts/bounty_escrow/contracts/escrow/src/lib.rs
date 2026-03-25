@@ -436,6 +436,69 @@ mod anti_abuse {
     }
 }
 
+/// Role-Based Access Control (RBAC) helpers.
+///
+/// # Role Matrix
+///
+/// | Action                  | Admin | Operator (anti-abuse admin) | Participant (depositor) |
+/// |-------------------------|-------|-----------------------------|-------------------------|
+/// | `init`                  | ✓     | ✗                           | ✗                       |
+/// | `set_paused`            | ✓     | ✗                           | ✗                       |
+/// | `emergency_withdraw`    | ✓     | ✗                           | ✗                       |
+/// | `update_fee_config`     | ✓     | ✗                           | ✗                       |
+/// | `set_maintenance_mode`  | ✓     | ✗                           | ✗                       |
+/// | `set_deprecated`        | ✓     | ✗                           | ✗                       |
+/// | `release_funds`         | ✓     | ✗                           | ✗                       |
+/// | `approve_refund`        | ✓     | ✗                           | ✗                       |
+/// | `partial_release`       | ✓     | ✗                           | ✗                       |
+/// | `set_anti_abuse_admin`  | ✓     | ✗                           | ✗                       |
+/// | `set_whitelist_entry`   | ✓     | ✓ (via anti-abuse admin)    | ✗                       |
+/// | `set_blocklist_entry`   | ✓     | ✓ (via anti-abuse admin)    | ✗                       |
+/// | `set_filter_mode`       | ✓     | ✗                           | ✗                       |
+/// | `update_anti_abuse_cfg` | ✓     | ✗                           | ✗                       |
+/// | `lock_funds`            | ✗     | ✗                           | ✓ (self only)           |
+/// | `refund`                | ✓+✓   | ✗                           | ✓ (co-sign)             |
+///
+/// # Security Invariants
+/// - No privilege escalation: operators cannot call admin-only functions.
+/// - No cross-call escalation: a participant cannot trigger admin actions indirectly.
+/// - `refund` requires both admin AND depositor signatures (dual-auth).
+pub mod rbac {
+    use soroban_sdk::{Address, Env};
+
+    use crate::DataKey;
+
+    /// Returns the stored admin address, panicking if not initialized.
+    pub fn require_admin(env: &Env) -> Address {
+        env.storage()
+            .instance()
+            .get::<DataKey, Address>(&DataKey::Admin)
+            .expect("contract not initialized")
+    }
+
+    /// Asserts that `caller` is the stored admin. Panics otherwise.
+    pub fn assert_admin(env: &Env, caller: &Address) {
+        let admin = require_admin(env);
+        assert_eq!(&admin, caller, "caller is not admin");
+        caller.require_auth();
+    }
+
+    /// Returns `true` if `addr` is the stored admin.
+    pub fn is_admin(env: &Env, addr: &Address) -> bool {
+        env.storage()
+            .instance()
+            .get::<DataKey, Address>(&DataKey::Admin)
+            .map(|a| &a == addr)
+            .unwrap_or(false)
+    }
+
+    /// Returns `true` if `addr` is the stored anti-abuse (operator) admin.
+    pub fn is_operator(env: &Env, addr: &Address) -> bool {
+        use crate::anti_abuse;
+        anti_abuse::get_admin(env).map(|a| &a == addr).unwrap_or(false)
+    }
+}
+
 #[allow(dead_code)]
 const BASIS_POINTS: i128 = 10_000;
 const MAX_FEE_RATE: i128 = 5_000; // 50% max fee
