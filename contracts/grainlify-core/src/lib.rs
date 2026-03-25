@@ -1,153 +1,6 @@
 //! # Grainlify Contract Upgrade System
 //!
-//! A minimal, secure contract upgrade pattern for Soroban smart contracts.
-//! This contract implements admin-controlled WASM upgrades with version tracking.
-//!
-//! ## Overview
-//!
-//! The Grainlify contract provides a foundational upgrade mechanism that allows
-//! authorized administrators to update contract logic while maintaining state
-//! persistence. This is essential for bug fixes, feature additions, and security
-//! patches in production environments.
-//!
-//! ## Architecture
-//!
-//! ```text
-//! ┌─────────────────────────────────────────────────────────────┐
-//! │              Contract Upgrade Architecture                   │
-//! ├─────────────────────────────────────────────────────────────┤
-//! │                                                              │
-//! │  ┌──────────────┐                                           │
-//! │  │    Admin     │                                           │
-//! │  └──────┬───────┘                                           │
-//! │         │                                                    │
-//! │         │ 1. Compile new WASM                               │
-//! │         │ 2. Upload to Stellar                              │
-//! │         │ 3. Get WASM hash                                  │
-//! │         │                                                    │
-//! │         ▼                                                    │
-//! │  ┌──────────────────┐                                       │
-//! │  │  upgrade(hash)   │────────┐                              │
-//! │  └──────────────────┘        │                              │
-//! │         │                     │                              │
-//! │         │ require_auth()      │                              │
-//! │         │                     ▼                              │
-//! │         │              ┌─────────────┐                       │
-//! │         │              │   Verify    │                       │
-//! │         │              │   Admin     │                       │
-//! │         │              └──────┬──────┘                       │
-//! │         │                     │                              │
-//! │         │                     ▼                              │
-//! │         │              ┌─────────────┐                       │
-//! │         └─────────────>│   Update    │                       │
-//! │                        │   WASM      │                       │
-//! │                        └──────┬──────┘                       │
-//! │                               │                              │
-//! │                               ▼                              │
-//! │                        ┌─────────────┐                       │
-//! │                        │ New Version │                       │
-//! │                        │  (Optional) │                       │
-//! │                        └─────────────┘                       │
-//! │                                                              │
-//! │  Storage:                                                    │
-//! │  ┌────────────────────────────────────┐                     │
-//! │  │ Admin: Address                     │                     │
-//! │  │ Version: u32                       │                     │
-//! │  └────────────────────────────────────┘                     │
-//! └─────────────────────────────────────────────────────────────┘
-//! ```
-//!
-//! ## Security Model
-//!
-//! ### Trust Assumptions
-//! - **Admin**: Highly trusted entity with upgrade authority
-//! - **WASM Code**: New code must be audited before deployment
-//! - **State Preservation**: Upgrades preserve existing contract state
-//!
-//! ### Security Features
-//! 1. **Single Admin**: Only one authorized address can upgrade
-//! 2. **Authorization Check**: Every upgrade requires admin signature
-//! 3. **Version Tracking**: Auditable upgrade history
-//! 4. **State Preservation**: Instance storage persists across upgrades
-//! 5. **Immutable After Init**: Admin cannot be changed after initialization
-//!
-//! ### Security Considerations
-//! - Admin key should be secured with hardware wallet or multi-sig
-//! - New WASM should be audited before upgrade
-//! - Consider implementing timelock for high-value contracts
-//! - Version updates should follow semantic versioning
-//! - Test upgrades on testnet before mainnet deployment
-//!
-//! ## Upgrade Process
-//!
-//! ```rust
-//! // 1. Initialize contract (one-time)
-//! let admin = Address::from_string("GADMIN...");
-//! contract.init(&admin);
-//!
-//! // 2. Develop and test new version locally
-//! // ... make changes to contract code ...
-//!
-//! // 3. Build new WASM
-//! // $ cargo build --release --target wasm32-unknown-unknown
-//!
-//! // 4. Upload WASM to Stellar and get hash
-//! // $ stellar contract install --wasm target/wasm32-unknown-unknown/release/contract.wasm
-//! // Returns: hash (e.g., "abc123...")
-//!
-//! // 5. Perform upgrade
-//! let wasm_hash = BytesN::from_array(&env, &[0xab, 0xcd, ...]);
-//! contract.upgrade(&wasm_hash);
-//!
-//! // 6. (Optional) Update version number
-//! contract.set_version(&2);
-//!
-//! // 7. Verify upgrade
-//! let version = contract.get_version();
-//! assert_eq!(version, 2);
-//! ```
-//!
-//! ## State Migration
-//!
-//! When upgrading contracts that require state migration:
-//!
-//! ```rust
-//! // In new WASM version, add migration function:
-//! pub fn migrate(env: Env) {
-//!     let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
-//!     admin.require_auth();
-//!     
-//!     // Perform state migration
-//!     // Example: Convert old data format to new format
-//!     let old_version = env.storage().instance().get(&DataKey::Version).unwrap_or(0);
-//!     
-//!     if old_version < 2 {
-//!         // Migrate from v1 to v2
-//!         migrate_v1_to_v2(&env);
-//!     }
-//!     
-//!     // Update version
-//!     env.storage().instance().set(&DataKey::Version, &2u32);
-//! }
-//! ```
-//!
-//! ## Best Practices
-//!
-//! 1. **Version Numbering**: Use semantic versioning (MAJOR.MINOR.PATCH)
-//! 2. **Testing**: Always test upgrades on testnet first
-//! 3. **Auditing**: Audit new code before mainnet deployment
-//! 4. **Documentation**: Document breaking changes between versions
-//! 5. **Rollback Plan**: Keep previous WASM hash for emergency rollback
-//! 6. **Admin Security**: Use multi-sig or timelock for production
-//! 7. **State Validation**: Verify state integrity after upgrade
-//!
-//! ## Common Pitfalls
-//!
-//! - ❌ Not testing upgrades on testnet
-//! - ❌ Losing admin private key
-//! - ❌ Breaking state compatibility between versions
-//! - ❌ Not documenting migration steps
-//! - ❌ Upgrading without proper testing
+//! Secure contract upgrade pattern with admin-controlled WASM updates and version tracking.
 //! - ❌ Not having a rollback plan
 
 #![no_std]
@@ -553,6 +406,16 @@ pub struct CoreConfigSnapshot {
     pub multisig_signers: Vec<Address>,
 }
 
+fn contract_is_initialized(env: &Env) -> bool {
+    env.storage().instance().has(&DataKey::Version)
+        || env.storage().instance().has(&DataKey::Admin)
+        || env.storage().instance().has(&DataKey::ChainId)
+        || env.storage().instance().has(&DataKey::NetworkId)
+        || env.storage().instance().has(&governance::GOVERNANCE_CONFIG)
+        || env.storage().instance().has(&governance::PROPOSAL_COUNT)
+        || MultiSig::get_config_opt(env).is_some()
+}
+
 // ============================================================================
 // Migration System
 // ============================================================================
@@ -659,12 +522,12 @@ impl GrainlifyContract {
     /// - One-time initialization only
     /// - Sets up multisig configuration for upgrade governance
     /// - All signers must have matching threshold count
-    /// - Re-initialization is prevented via Version storage key
+    /// - Re-initialization is prevented across all init entrypoints
     pub fn init(env: Env, signers: Vec<Address>, threshold: u32) {
         let start = env.ledger().timestamp();
 
         // Prevent re-initialization to protect immutability of multisig config
-        if env.storage().instance().has(&DataKey::Version) {
+        if contract_is_initialized(&env) {
             panic!("Already initialized");
         }
 
@@ -696,7 +559,7 @@ impl GrainlifyContract {
     /// - One-time initialization only
     /// - Admin address is immutable after initialization
     /// - Only single admin, no multisig
-    /// - Re-initialization is prevented via both Admin and Version storage keys
+    /// - Re-initialization is prevented across all init entrypoints
     ///
     /// # State Changes
     /// - Sets Admin address in instance storage (immutable)
@@ -707,8 +570,7 @@ impl GrainlifyContract {
 
         // Prevent re-initialization to protect admin immutability
         // Check both Admin and Version to be extra safe
-        if env.storage().instance().has(&DataKey::Admin) 
-            || env.storage().instance().has(&DataKey::Version) {
+        if contract_is_initialized(&env) {
             monitoring::track_operation(&env, symbol_short!("init"), admin.clone(), false);
             panic!("Already initialized");
         }
@@ -747,14 +609,14 @@ impl GrainlifyContract {
     /// # Security Model
     /// - One-time initialization only
     /// - Admin address is immutable after initialization
-    /// - Requires authorization from the admin address
+    /// - Does not require auth during first-call initialization
     /// - Governance parameters are locked after initialization
-    /// - Re-initialization is prevented via Version storage key
+    /// - Re-initialization is prevented across all init entrypoints
     ///
     /// # Governance Configuration Validation
     /// - `quorum_percentage`: Must be 0-10000 (basis points, 0-100%)
     /// - `approval_threshold`: Must be 0-10000 (basis points, 0-100%)
-    /// - `voting_period`: Must be > 0 (in ledger seconds)
+    /// - `voting_period`: May be zero if immediate-close voting is desired
     /// - `voting_scheme`: OnePersonOneVote or TokenWeighted
     ///
     /// # State Changes
@@ -808,20 +670,25 @@ impl GrainlifyContract {
         let start = env.ledger().timestamp();
 
         // Prevent re-initialization to protect immutability
-        if env.storage().instance().has(&DataKey::Version) {
+        if contract_is_initialized(&env) {
             monitoring::track_operation(&env, symbol_short!("init_gov"), admin.clone(), false);
             panic!("Already initialized");
         }
 
-        // Validate governance configuration thresholds
-        if config.quorum_percentage > 10000 || config.approval_threshold > 10000 {
-            monitoring::track_operation(&env, symbol_short!("init_gov"), admin.clone(), false);
-            panic!("Invalid governance threshold");
-        }
-
-        if config.approval_threshold < 5000 {
-            monitoring::track_operation(&env, symbol_short!("init_gov"), admin.clone(), false);
-            panic!("Approval threshold too low (minimum 50%)");
+        match governance::validate_config(&config) {
+            Ok(()) => {}
+            Err(governance::Error::InvalidThreshold) => {
+                monitoring::track_operation(&env, symbol_short!("init_gov"), admin.clone(), false);
+                panic!("Invalid governance threshold");
+            }
+            Err(governance::Error::ThresholdTooLow) => {
+                monitoring::track_operation(&env, symbol_short!("init_gov"), admin.clone(), false);
+                panic!("Approval threshold too low (minimum 50%)");
+            }
+            Err(_) => {
+                monitoring::track_operation(&env, symbol_short!("init_gov"), admin.clone(), false);
+                panic!("Invalid governance configuration");
+            }
         }
 
         // Store admin address (immutable after this point)
@@ -1306,7 +1173,7 @@ impl GrainlifyContract {
     /// * `chain_id` - Optional chain identifier (e.g., "stellar", "ethereum")
     /// * `network_id` - Optional network identifier (e.g., "mainnet", "testnet")
     pub fn init_with_network(env: Env, admin: Address, chain_id: String, network_id: String) {
-        if env.storage().instance().has(&DataKey::Admin) {
+        if contract_is_initialized(&env) {
             panic!("Already initialized");
         }
 

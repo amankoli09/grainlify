@@ -1,7 +1,10 @@
 #![cfg(test)]
 
-use crate::{DataKey, GrainlifyContract, GrainlifyContractClient, GovernanceConfig, VotingScheme};
-use soroban_sdk::{testutils::Address as _, Address, Env, Symbol, Vec};
+use crate::{
+    governance, DataKey, GrainlifyContract, GrainlifyContractClient, GovernanceConfig,
+    VotingScheme,
+};
+use soroban_sdk::{testutils::Address as _, Address, Env, String, Symbol, Vec};
 
 fn setup_contract(env: &Env) -> (GrainlifyContractClient<'_>, Address) {
     let contract_id = env.register_contract(None, GrainlifyContract);
@@ -9,6 +12,17 @@ fn setup_contract(env: &Env) -> (GrainlifyContractClient<'_>, Address) {
     let admin = Address::generate(env);
     client.init_admin(&admin);
     (client, admin)
+}
+
+fn default_governance_config() -> GovernanceConfig {
+    GovernanceConfig {
+        voting_period: 86400,
+        execution_delay: 3600,
+        quorum_percentage: 4000,
+        approval_threshold: 6000,
+        min_proposal_stake: 1000,
+        voting_scheme: VotingScheme::OnePersonOneVote,
+    }
 }
 
 // ============================================================================
@@ -153,14 +167,7 @@ fn test_init_governance_success() {
     let client = GrainlifyContractClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);
-    let gov_config = GovernanceConfig {
-        voting_period: 86400,
-        execution_delay: 3600,
-        quorum_percentage: 4000,
-        approval_threshold: 6000,
-        min_proposal_stake: 1000,
-        voting_scheme: VotingScheme::OnePersonOneVote,
-    };
+    let gov_config = default_governance_config();
 
     // Initialize with governance
     client.init_governance(&admin, &gov_config);
@@ -168,6 +175,22 @@ fn test_init_governance_success() {
     // Verify version is set
     let version = client.get_version();
     assert_eq!(version, 2); // VERSION constant = 2
+
+    env.as_contract(&client.address, || {
+        let stored_config: GovernanceConfig = env
+            .storage()
+            .instance()
+            .get(&governance::GOVERNANCE_CONFIG)
+            .unwrap();
+        let proposal_count: u32 = env
+            .storage()
+            .instance()
+            .get(&governance::PROPOSAL_COUNT)
+            .unwrap();
+
+        assert_eq!(stored_config, gov_config);
+        assert_eq!(proposal_count, 0);
+    });
 }
 
 /// Tests that init_governance prevents re-initialization
@@ -528,6 +551,48 @@ fn test_all_init_paths_mutually_exclusive() {
         let result = client.try_init_governance(&admin, &gov_config);
         assert!(result.is_err());
     }
+}
+
+/// Tests that multisig initialization also blocks the legacy network init path.
+#[test]
+fn test_init_with_network_blocked_after_multisig_init() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, GrainlifyContract);
+    let client = GrainlifyContractClient::new(&env, &contract_id);
+
+    let signer1 = Address::generate(&env);
+    let signer2 = Address::generate(&env);
+    let signers = Vec::from_array(&env, [signer1, signer2]);
+    client.init(&signers, &2u32);
+
+    let admin = Address::generate(&env);
+    let chain_id = String::from_str(&env, "stellar");
+    let network_id = String::from_str(&env, "testnet");
+    let result = client.try_init_with_network(&admin, &chain_id, &network_id);
+
+    assert!(result.is_err());
+}
+
+/// Tests that governance initialization also blocks the legacy network init path.
+#[test]
+fn test_init_with_network_blocked_after_governance_init() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, GrainlifyContract);
+    let client = GrainlifyContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let gov_config = default_governance_config();
+    client.init_governance(&admin, &gov_config);
+
+    let chain_id = String::from_str(&env, "stellar");
+    let network_id = String::from_str(&env, "testnet");
+    let result = client.try_init_with_network(&admin, &chain_id, &network_id);
+
+    assert!(result.is_err());
 }
 
 // ============================================================================
