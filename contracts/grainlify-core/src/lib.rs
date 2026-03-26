@@ -15,12 +15,13 @@ use soroban_sdk::{
 #[cfg(test)]
 use soroban_sdk::testutils::Address as _;
 pub mod asset;
+pub mod errors;
 mod governance;
 pub mod nonce;
 pub mod pseudo_randomness;
 
 pub use governance::{
-    Error as GovError, GovernanceConfig, Proposal, ProposalStatus, Vote, VoteType, VotingScheme,
+    GovernanceConfig, Proposal, ProposalStatus, Vote, VoteType, VotingScheme,
 };
 
 // ============================================================================
@@ -28,24 +29,15 @@ pub use governance::{
 // ============================================================================
 
 /// Typed errors for the GrainlifyContract.
-///
-/// Using `#[contracterror]` ensures these are surfaced as structured error
-/// codes in the Soroban host rather than opaque panic strings, making them
-/// easier to handle in client SDKs and off-chain tooling.
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[repr(u32)]
 pub enum ContractError {
-    /// Contract has already been initialized; `init*` cannot be called again.
     AlreadyInitialized = 1,
-    /// Caller is not the configured admin.
-    NotAdmin = 2,
-    /// Contract has not been initialized yet (admin not set).
-    NotInitialized = 3,
-    /// Multisig threshold has not been reached for this proposal.
-    ThresholdNotMet = 4,
-    /// The referenced upgrade proposal does not exist.
-    ProposalNotFound = 5,
+    NotAdmin = 3,           // Unified UNAUTHORIZED
+    NotInitialized = 2,
+    ThresholdNotMet = 101,
+    ProposalNotFound = 102,
 }
 
 // ============================================================================
@@ -1281,10 +1273,10 @@ impl GrainlifyContract {
         // Security: Verify contract state is consistent before upgrade
         if !monitoring::verify_invariants(&env) {
             monitoring::track_operation(
-                &env,
-                upgrade_op.clone(),
-                env.current_contract_address(),
-                false,
+                &env, 
+                Symbol::new(&env, "execute_upgrade"), 
+                env.current_contract_address(), 
+                false
             );
             panic!("Contract state inconsistent - upgrade blocked");
         }
@@ -1292,10 +1284,10 @@ impl GrainlifyContract {
         // Verify proposal exists and has sufficient approvals
         if !MultiSig::can_execute(&env, proposal_id) {
             monitoring::track_operation(
-                &env,
-                upgrade_op.clone(),
-                env.current_contract_address(),
-                false,
+                &env, 
+                Symbol::new(&env, "execute_upgrade"), 
+                env.current_contract_address(), 
+                false
             );
             panic!("Threshold not met or proposal not executable");
         }
@@ -1318,7 +1310,7 @@ impl GrainlifyContract {
         env.events().publish(
             (symbol_short!("upgrade"), symbol_short!("wasm")),
             UpgradeEvent {
-                new_wasm_hash: wasm_hash.clone(),
+                new_wasm_hash: proposal.wasm_hash.clone(),
                 version: current_version,
                 timestamp: env.ledger().timestamp(),
             },
@@ -1329,19 +1321,21 @@ impl GrainlifyContract {
 
         // Track successful operation
         monitoring::track_operation(
-            &env,
-            upgrade_op.clone(),
-            env.current_contract_address(),
-            true,
+            &env, 
+            Symbol::new(&env, "execute_upgrade"), 
+            env.current_contract_address(), 
+            true
         );
 
         // Track performance
         let duration = env.ledger().timestamp().saturating_sub(start);
-        monitoring::emit_performance(&env, upgrade_op, duration);
+        monitoring::emit_performance(&env, Symbol::new(&env, "execute_upgrade"), duration);
 
         // Emit upgrade execution event
-        env.events()
-            .publish((upgrade_exec,), (proposal_id, wasm_hash, current_version));
+        env.events().publish(
+            (Symbol::new(&env, "upgrade_executed"),),
+            (proposal_id, proposal.wasm_hash, current_version),
+        );
     }
 
     fn load_upgrade_proposal(env: &Env, proposal_id: u64) -> Option<UpgradeProposalRecord> {
@@ -1571,7 +1565,7 @@ impl GrainlifyContract {
     /// encoding (e.g., `20000` for ≥ 2.0.0, `10100` for ≥ 1.1.0).
     ///
     /// # Errors
-    /// Panics with [`ContractError::NotInitialized`] (code `3`) when the
+    /// Panics with [`ContractError::NotInitialized`] (code `2`) when the
     /// contract has not been initialised yet (version == 0).
     ///
     /// Panics with the string `"version_too_low"` when the current encoded
