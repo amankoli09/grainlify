@@ -1043,6 +1043,9 @@ impl BountyEscrowContract {
         if env.storage().instance().has(&DataKey::Admin) {
             return Err(Error::AlreadyInitialized);
         }
+        if admin == token {
+            return Err(Error::Unauthorized);
+        }
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::Token, &token);
         env.storage().instance().set(&DataKey::Version, &1u32);
@@ -5184,7 +5187,7 @@ impl traits::PauseInterface for BountyEscrowContract {
     }
 
     fn is_operation_paused(env: &Env, operation: soroban_sdk::Symbol) -> bool {
-        BountyEscrowContract::check_paused(env, operation)
+        Self::check_paused(env, operation)
     }
 }
 
