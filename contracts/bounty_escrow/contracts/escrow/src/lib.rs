@@ -1328,6 +1328,7 @@ impl BountyEscrowContract {
         fee_amount: i128,
         fee_rate: i128,
         operation_type: events::FeeOperationType,
+        fee_fixed: i128,
     ) -> Result<(), Error> {
         if fee_amount <= 0 {
             return Ok(());
@@ -1345,6 +1346,7 @@ impl BountyEscrowContract {
                     operation_type,
                     amount: fee_amount,
                     fee_rate,
+                    fee_fixed,
                     recipient: config.fee_recipient.clone(),
                     timestamp: env.ledger().timestamp(),
                 },
@@ -1371,6 +1373,7 @@ impl BountyEscrowContract {
                     operation_type,
                     amount: fee_amount,
                     fee_rate,
+                    fee_fixed,
                     recipient: config.fee_recipient.clone(),
                     timestamp: env.ledger().timestamp(),
                 },
@@ -1406,6 +1409,7 @@ impl BountyEscrowContract {
                     operation_type: operation_type.clone(),
                     amount: share,
                     fee_rate,
+                    fee_fixed,
                     recipient: destination.address,
                     timestamp: env.ledger().timestamp(),
                 },
@@ -2833,17 +2837,17 @@ impl BountyEscrowContract {
         // Transfer fee to recipient immediately (separate transfer so it is
         // visible as a distinct on-chain operation).
         if fee_amount > 0 {
+            let mut fee_config = Self::get_fee_config_internal(&env);
+            fee_config.fee_recipient = fee_recipient;
             Self::route_fee(
                 &env,
-                events::FeeCollected {
-                    operation_type: events::FeeOperationType::Lock,
-                    amount: fee_amount,
-                    fee_rate: lock_fee_rate,
-                    fee_fixed: lock_fixed_fee,
-                    recipient: fee_recipient,
-                    timestamp: env.ledger().timestamp(),
-                },
-            );
+                &client,
+                &fee_config,
+                fee_amount,
+                lock_fee_rate,
+                events::FeeOperationType::Lock,
+                lock_fixed_fee,
+            )?;
         }
         soroban_sdk::log!(&env, "fee ok");
 
@@ -2947,23 +2951,25 @@ impl BountyEscrowContract {
     /// This function performs only read operations. No storage writes, token transfers,
     /// or events are emitted.
     pub fn archive_escrow(env: Env, bounty_id: u64) -> Result<(), Error> {
-        let admin = Self::require_admin(&env)?;
+        if !env.storage().instance().has(&DataKey::Admin) {
+            return Err(Error::NotInitialized);
+        }
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
 
-        let mut escrow = env
+        let mut found = false;
+        if let Some(mut escrow) = env
             .storage()
             .persistent()
             .get::<DataKey, Escrow>(&DataKey::Escrow(bounty_id))
-            .ok_or(Error::EscrowNotFound)?;
-
-        escrow.archived = true;
-        escrow.archived_at = Some(env.ledger().timestamp());
-
-        env.storage()
-            .persistent()
-            .set(&DataKey::Escrow(bounty_id), &escrow);
-
-        // Also check anon escrow
+        {
+            escrow.archived = true;
+            escrow.archived_at = Some(env.ledger().timestamp());
+            env.storage()
+                .persistent()
+                .set(&DataKey::Escrow(bounty_id), &escrow);
+            found = true;
+        }
         if let Some(mut anon) = env
             .storage()
             .persistent()
@@ -2974,6 +2980,10 @@ impl BountyEscrowContract {
             env.storage()
                 .persistent()
                 .set(&DataKey::EscrowAnon(bounty_id), &anon);
+            found = true;
+        }
+        if !found {
+            return Err(Error::BountyNotFound);
         }
 
         events::emit_archived(&env, bounty_id, env.ledger().timestamp());
@@ -3330,17 +3340,17 @@ impl BountyEscrowContract {
         let client = token::Client::new(&env, &token_addr);
 
         if release_fee > 0 {
+            let mut fee_config = Self::get_fee_config_internal(&env);
+            fee_config.fee_recipient = fee_recipient;
             Self::route_fee(
                 &env,
-                events::FeeCollected {
-                    operation_type: events::FeeOperationType::Release,
-                    amount: release_fee,
-                    fee_rate: release_fee_rate,
-                    fee_fixed: release_fixed_fee,
-                    recipient: fee_recipient,
-                    timestamp: env.ledger().timestamp(),
-                },
-            );
+                &client,
+                &fee_config,
+                release_fee,
+                release_fee_rate,
+                events::FeeOperationType::Release,
+                release_fixed_fee,
+            )?;
         }
 
         client.transfer(&env.current_contract_address(), &contributor, &net_payout);
@@ -3947,7 +3957,7 @@ impl BountyEscrowContract {
             FundsReleased {
                 version: EVENT_VERSION_V2,
                 bounty_id,
-                amount: net_to_contributor,
+                amount: payout_amount,
                 recipient: contributor,
                 timestamp: env.ledger().timestamp(),
             },
@@ -6164,6 +6174,8 @@ impl traits::FeeInterface for BountyEscrowContract {
     ) -> Result<(), crate::Error> {
         let entrypoint: fn(
             Env,
+            Option<i128>,
+            Option<i128>,
             Option<i128>,
             Option<i128>,
             Option<Address>,

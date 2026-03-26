@@ -235,6 +235,8 @@ pub struct FeeCollected {
     pub operation_type: FeeOperationType, // determines if the fee was collected on lock or release.
     pub amount: i128,                     // actual fee amount transferred
     pub fee_rate: i128,                   // fee rate applied in basis points (1 bp = 0.01 %).
+    /// Configured flat fee component (smallest units) for this operation type.
+    pub fee_fixed: i128,
     pub recipient: Address,
     pub timestamp: u64, // Ledger timestamp.
 }
@@ -291,6 +293,8 @@ pub struct FeeConfigUpdated {
     pub lock_fee_rate: i128,
     /// New release fee rate in basis points.
     pub release_fee_rate: i128,
+    pub lock_fixed_fee: i128,
+    pub release_fixed_fee: i128,
     /// Address designated to receive fees.
     pub fee_recipient: Address,
     /// Whether fee collection is active after this update.
@@ -938,4 +942,86 @@ pub struct CapabilityRevoked {
 pub fn emit_capability_revoked(env: &Env, event: CapabilityRevoked) {
     let topics = (symbol_short!("cap_rev"), event.capability_id);
     env.events().publish(topics, event);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// EXPIRY, CLEANUP, ARCHIVE, GAS BUDGET
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Emitted when the admin updates [`crate::ExpiryConfig`].
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct ExpiryConfigUpdated {
+    pub default_expiry_duration: u64,
+    pub auto_cleanup_enabled: bool,
+    pub admin: Address,
+    pub timestamp: u64,
+}
+
+pub fn emit_expiry_config_updated(env: &Env, event: ExpiryConfigUpdated) {
+    let topics = (symbol_short!("exp_cfg"),);
+    env.events().publish(topics, event.clone());
+}
+
+/// Emitted when an escrow is marked [`crate::EscrowStatus::Expired`].
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct EscrowExpired {
+    pub version: u32,
+    pub bounty_id: u64,
+    pub creation_timestamp: u64,
+    pub expiry: u64,
+    pub remaining_amount: i128,
+    pub timestamp: u64,
+}
+
+pub fn emit_escrow_expired(env: &Env, event: EscrowExpired) {
+    let topics = (symbol_short!("expired"), event.bounty_id);
+    env.events().publish(topics, event.clone());
+}
+
+/// Emitted when an expired escrow record is removed from storage.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct EscrowCleanedUp {
+    pub version: u32,
+    pub bounty_id: u64,
+    pub cleaned_by: Address,
+    pub timestamp: u64,
+}
+
+pub fn emit_escrow_cleaned_up(env: &Env, event: EscrowCleanedUp) {
+    let topics = (symbol_short!("cln_up"), event.bounty_id);
+    env.events().publish(topics, event.clone());
+}
+
+/// Published when a measured operation exceeds its configured CPU or memory cap.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct GasBudgetCapExceeded {
+    pub operation: Symbol,
+    pub cpu_used: u64,
+    pub mem_used: u64,
+    pub cpu_cap: u64,
+    pub mem_cap: u64,
+    pub timestamp: u64,
+}
+
+/// Published when usage approaches the configured cap (advisory).
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct GasBudgetCapApproached {
+    pub operation: Symbol,
+    pub cpu_used: u64,
+    pub mem_used: u64,
+    pub cpu_cap: u64,
+    pub mem_cap: u64,
+    pub threshold_bps: u32,
+    pub timestamp: u64,
+}
+
+/// Mark an escrow row as archived for indexer visibility.
+pub fn emit_archived(env: &Env, bounty_id: u64, timestamp: u64) {
+    let topics = (symbol_short!("archived"), bounty_id);
+    env.events().publish(topics, timestamp);
 }
