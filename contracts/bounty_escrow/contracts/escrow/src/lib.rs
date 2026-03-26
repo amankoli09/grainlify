@@ -541,69 +541,47 @@ pub enum ReleaseType {
     Automatic = 2,
 }
 
+use grainlify_core::errors;
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
 pub enum Error {
     AlreadyInitialized = 1,
     NotInitialized = 2,
-    BountyExists = 3,
-    BountyNotFound = 4,
-    FundsNotLocked = 5,
+    BountyExists = 201,
+    BountyNotFound = 202,
+    FundsNotLocked = 203,
     DeadlineNotPassed = 6,
-    Unauthorized = 7,
-    InvalidFeeRate = 8,
-    FeeRecipientNotSet = 9,
-    InvalidBatchSize = 10,
-    BatchSizeMismatch = 11,
-    DuplicateBountyId = 12,
-    /// Returned when amount is invalid (zero, negative, or exceeds available)
-    InvalidAmount = 13,
-    /// Returned when deadline is invalid (in the past or too far in the future)
-    InvalidDeadline = 14,
-    /// Returned when contract has insufficient funds for the operation
-    InsufficientFunds = 16,
-    /// Returned when refund is attempted without admin approval
-    RefundNotApproved = 17,
-    FundsPaused = 18,
-    /// Returned when lock amount is below the configured policy minimum (Issue #62)
-    AmountBelowMinimum = 19,
-    /// Returned when lock amount is above the configured policy maximum (Issue #62)
-    AmountAboveMaximum = 20,
-    /// Returned when refund is blocked by a pending claim/dispute
-    NotPaused = 21,
-    ClaimPending = 22,
-    /// Returned when claim ticket is not found
-    TicketNotFound = 23,
-    /// Returned when claim ticket has already been used (replay prevention)
-    TicketAlreadyUsed = 24,
-    /// Returned when claim ticket has expired
-    TicketExpired = 25,
-    CapabilityNotFound = 26,
-    CapabilityExpired = 27,
-    CapabilityRevoked = 28,
-    CapabilityActionMismatch = 29,
-    CapabilityAmountExceeded = 30,
-    CapabilityUsesExhausted = 31,
-    CapabilityExceedsAuthority = 32,
-    InvalidAssetId = 33,
-    /// Returned when new locks/registrations are disabled (contract deprecated)
-    ContractDeprecated = 34,
-    /// Returned when participant filtering is blocklist-only and the address is blocklisted
-    ParticipantBlocked = 35,
-    /// Returned when participant filtering is allowlist-only and the address is not allowlisted
-    ParticipantNotAllowed = 36,
-    /// Refund for anonymous escrow must go through refund_resolved (resolver provides recipient)
-    AnonymousRefundRequiresResolution = 39,
-    /// Anonymous resolver address not set in instance storage
-    AnonymousResolverNotSet = 40,
-    /// Bounty exists but is not an anonymous escrow (for refund_resolved)
-    NotAnonymousEscrow = 41,
-    /// Use get_escrow_info_v2 for anonymous escrows
-    UseGetEscrowInfoV2ForAnonymous = 37,
-    InvalidSelectionInput = 42,
-    /// Returned when an upgrade safety pre-check fails
-    UpgradeSafetyCheckFailed = 43,
+    Unauthorized = 3,
+    InvalidFeeRate = 204,
+    FeeRecipientNotSet = 205,
+    InvalidBatchSize = 206,
+    BatchSizeMismatch = 207,
+    DuplicateBountyId = 208,
+    InvalidAmount = 4,
+    InvalidDeadline = 7,
+    InsufficientFunds = 5,
+    RefundNotApproved = 209,
+    FundsPaused = 10,
+    AmountBelowMinimum = 210,
+    AmountAboveMaximum = 211,
+    NotPaused = 14,
+    ClaimPending = 212,
+    TicketNotFound = 213,
+    TicketAlreadyUsed = 214,
+    TicketExpired = 215,
+    ParticipantBlocked = 216,
+    ParticipantNotAllowed = 217,
+    NotAnonymousEscrow = 218,
+    InvalidSelectionInput = 219,
+    UpgradeSafetyCheckFailed = 220,
+    BountyAlreadyInitialized = 221,
+    AnonRefundRequired = 222,
+    AnonResolverNotSet = 223,
+    NotAnonVariant = 224,
+    UseInfoV2ForAnon = 225,
+    InvalidAssetId = 15,
+    ContractDeprecated = 8,
 }
 
 /// Bit flag: escrow or payout should be treated as elevated risk (indexers, UIs).

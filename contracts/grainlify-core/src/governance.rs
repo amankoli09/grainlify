@@ -118,24 +118,25 @@ pub const VOTES: Symbol = symbol_short!("VOTES");
 pub const GOVERNANCE_CONFIG: Symbol = symbol_short!("GOV_CFG");
 
 /// Governance errors returned by the standalone governance contract.
+use crate::errors;
 #[soroban_sdk::contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
 pub enum Error {
-    NotInitialized = 1,
-    InvalidThreshold = 2,
-    ThresholdTooLow = 3,
-    InsufficientStake = 4,
-    ProposalsNotFound = 5,
-    ProposalNotFound = 6,
-    ProposalNotActive = 7,
-    VotingNotStarted = 8,
-    VotingEnded = 9,
-    VotingStillActive = 10,
-    AlreadyVoted = 11,
-    ProposalNotApproved = 12,
-    ExecutionDelayNotMet = 13,
-    ProposalExpired = 14,
+    NotInitialized = 2,
+    InvalidThreshold = 103,
+    ThresholdTooLow = 104,
+    InsufficientStake = 105,
+    ProposalsNotFound = 106,
+    ProposalNotFound = 102,
+    ProposalNotActive = 107,
+    VotingNotStarted = 108,
+    VotingEnded = 109,
+    VotingStillActive = 110,
+    AlreadyVoted = 111,
+    ProposalNotApproved = 112,
+    ExecutionDelayNotMet = 113,
+    ProposalExpired = 114,
 }
 
 /// Validates the immutable governance configuration used during initialization.
