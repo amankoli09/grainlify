@@ -4339,111 +4339,44 @@ impl BountyEscrowContract {
         let now = env.ledger().timestamp();
         let refund_to = escrow.depositor.clone();
 
-    pub fn initialize_escrow(
-        ctx: Context<InitializeEscrow>,
-        bounty_id: String,
-        amount: u64,
-        expiry: i64,
-    ) -> Result<()> {
-        let escrow = &mut ctx.accounts.escrow;
-        escrow.initializer = ctx.accounts.initializer.key();
-        escrow.bounty_id = bounty_id;
-        escrow.amount = amount;
-        escrow.expiry = expiry;
-        escrow.status = EscrowStatus::Active;
-        escrow.bump = ctx.bumps.escrow;
+        // Update escrow status
+        escrow.status = EscrowStatus::Refunded;
+        escrow.remaining_amount = 0;
+        env.storage()
+            .persistent()
+            .set(&DataKey::Escrow(bounty_id), &escrow);
 
-        // Transfer tokens to vault
-        let cpi_accounts = Transfer {
-            from: ctx.accounts.initializer_token_account.to_account_info(),
-            to: ctx.accounts.vault_token_account.to_account_info(),
-            authority: ctx.accounts.initializer.to_account_info(),
-        };
-        let cpi_program = ctx.accounts.token_program.to_account_info();
-        let cpi_ctx = CpiContext::new(cpi_program, cpi_accounts);
-        token::transfer(cpi_ctx, amount)?;
-
-        emit!(EscrowInitialized {
-            bounty_id: escrow.bounty_id.clone(),
-            initializer: escrow.initializer,
-            amount,
-        });
-
-        Ok(())
-    }
-
-    pub fn complete_bounty(ctx: Context<CompleteBounty>) -> Result<()> {
-        let escrow = &mut ctx.accounts.escrow;
-        require!(escrow.status == EscrowStatus::Active, EscrowError::EscrowNotActive);
-
-        let seeds = &[
-            b"escrow".as_ref(),
-            escrow.initializer.as_ref(),
-            escrow.bounty_id.as_bytes(),
-            &[escrow.bump],
-        ];
-        let signer = &[&seeds[..]];
-
-        let cpi_accounts = Transfer {
-            from: ctx.accounts.vault_token_account.to_account_info(),
-            to: ctx.accounts.contributor_token_account.to_account_info(),
-            authority: escrow.to_account_info(),
-        };
-        let cpi_program = ctx.accounts.token_program.to_account_info();
-        let cpi_ctx = CpiContext::new_with_signer(cpi_program, cpi_accounts, signer);
-        token::transfer(cpi_ctx, escrow.amount)?;
-
-        escrow.status = EscrowStatus::Completed;
-
-        emit!(BountyCompleted {
-            bounty_id: escrow.bounty_id.clone(),
-            contributor: ctx.accounts.contributor.key(),
-        });
-
-        Ok(())
-    }
-
-    // --- NEW FUNCTIONS FROM new_functions.rs ---
-
-    pub fn set_conditional_refund(
-        ctx: Context<SetRefund>, 
-        mode: RefundMode, 
-        config: GasBudgetConfig
-    ) -> Result<()> {
-        let escrow = &mut ctx.accounts.escrow;
-        let refund_record = &mut ctx.accounts.refund_record;
-
-        refund_record.escrow = escrow.key();
-        refund_record.mode = mode;
-        refund_record.gas_budget = config.max_gas;
-        refund_record.is_resolved = false;
-
-        emit!(RefundModeSet {
-            bounty_id: escrow.bounty_id.clone(),
-            mode,
-        });
-
-        Ok(())
-    }
-
-    pub fn trigger_refund(ctx: Context<TriggerRefund>) -> Result<()> {
-        let escrow = &ctx.accounts.escrow;
-        let refund_record = &mut ctx.accounts.refund_record;
-
-        require!(!refund_record.is_resolved, EscrowError::RefundAlreadyResolved);
+        // INTERACTION: transfer tokens
+        let token_addr: Address = env.storage().instance().get(&DataKey::Token).unwrap();
+        let client = token::Client::new(&env, &token_addr);
+        let contract_address = env.current_contract_address();
         
-        let clock = Clock::get()?;
-        if refund_record.mode == RefundMode::TimeBased {
-            require!(clock.unix_timestamp > escrow.expiry, EscrowError::ExpiryNotReached);
-        }
+        client.transfer(&contract_address, &refund_to, &amount);
 
-        emit!(RefundTriggered {
-            bounty_id: escrow.bounty_id.clone(),
-            timestamp: clock.unix_timestamp,
-        });
+        // Emit event
+        emit_refund_executed(
+            &env,
+            RefundExecuted {
+                version: EVENT_VERSION_V2,
+                bounty_id,
+                amount,
+                recipient: refund_to,
+                timestamp: now,
+            },
+        );
+
+        // Release reentrancy guard
+        reentrancy_guard::release(&env);
 
         Ok(())
     }
+
+    /// Alias for batch_lock_funds to match the requested naming convention.
+    pub fn batch_lock(env: Env, items: Vec<LockFundsItem>) -> Result<u32, Error> {
+        Self::batch_lock_funds(env, items)
+    }
+
+    /// Batch release funds to multiple contributors in a single atomic transaction.
 
     /// Return the current per-operation gas budget configuration.
     ///
