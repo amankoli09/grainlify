@@ -369,18 +369,18 @@ fn test_program_custom_fields() {
 
     // Create metadata with custom fields
     let mut custom_fields = SdkVec::new(&s.env);
-    custom_fields.push_back((
-        String::from_str(&s.env, "total_participants"),
-        String::from_str(&s.env, "150"),
-    ));
-    custom_fields.push_back((
-        String::from_str(&s.env, "prize_pool_usd"),
-        String::from_str(&s.env, "50000"),
-    ));
-    custom_fields.push_back((
-        String::from_str(&s.env, "sponsor"),
-        String::from_str(&s.env, "Stellar Development Foundation"),
-    ));
+    custom_fields.push_back(ProgramMetadataField {
+        key: String::from_str(&s.env, "total_participants"),
+        value: String::from_str(&s.env, "150"),
+    });
+    custom_fields.push_back(ProgramMetadataField {
+        key: String::from_str(&s.env, "prize_pool_usd"),
+        value: String::from_str(&s.env, "50000"),
+    });
+    custom_fields.push_back(ProgramMetadataField {
+        key: String::from_str(&s.env, "sponsor"),
+        value: String::from_str(&s.env, "Stellar Development Foundation"),
+    });
 
     let metadata = ProgramMetadata {
         program_name: Some(String::from_str(&s.env, "Custom Fields Program")),
@@ -406,11 +406,8 @@ fn test_program_custom_fields() {
     assert_eq!(retrieved.custom_fields.len(), 3);
 
     let field_0 = retrieved.custom_fields.get(0).unwrap();
-    assert_eq!(
-        field_0.0,
-        String::from_str(&s.env, "total_participants")
-    );
-    assert_eq!(field_0.1, String::from_str(&s.env, "150"));
+    assert_eq!(field_0.key, String::from_str(&s.env, "total_participants"));
+    assert_eq!(field_0.value, String::from_str(&s.env, "150"));
 }
 
 // ============================================================================

@@ -414,6 +414,13 @@ pub struct ProgramMetadataUpdatedEvent {
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProgramMetadataField {
+    pub key: String,
+    pub value: String,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProgramMetadata {
     pub program_name: Option<String>,
     pub program_type: Option<String>,
@@ -421,7 +428,7 @@ pub struct ProgramMetadata {
     pub tags: Vec<String>,
     pub start_date: Option<u64>,
     pub end_date: Option<u64>,
-    pub custom_fields: Vec<(String, String)>,
+    pub custom_fields: Vec<ProgramMetadataField>,
 }
 
 #[contracttype]
@@ -437,7 +444,7 @@ pub struct ProgramData {
     pub token_address: Address,
     pub initial_liquidity: i128,
     pub risk_flags: u32,
-    pub metadata: Option<ProgramMetadata>,
+    pub metadata: ProgramMetadata,
     pub reference_hash: Option<soroban_sdk::Bytes>,
     pub archived: bool,
     pub archived_at: Option<u64>,
@@ -1027,7 +1034,15 @@ impl ProgramEscrowContract {
             token_address: token_address.clone(),
             initial_liquidity: init_liquidity,
             risk_flags: 0,
-            metadata: None,
+            metadata: ProgramMetadata {
+                program_name: None,
+                program_type: None,
+                ecosystem: None,
+                tags: Vec::new(&env),
+                start_date: None,
+                end_date: None,
+                custom_fields: Vec::new(&env),
+            },
             reference_hash,
             archived: false,
             archived_at: None,
@@ -1158,7 +1173,7 @@ impl ProgramEscrowContract {
         }
 
         let mut program_data = Self::initialize_program(
-            env,
+            env.clone(),
             program_id,
             authorized_payout_key,
             token_address,
@@ -1169,7 +1184,7 @@ impl ProgramEscrowContract {
 
         if let Some(program_metadata) = metadata {
             let program_id = program_data.program_id.clone();
-            program_data.metadata = Some(program_metadata);
+            program_data.metadata = program_metadata;
             Self::store_program_data(&env, &program_id, &program_data);
         }
 
@@ -1232,7 +1247,15 @@ impl ProgramEscrowContract {
                 token_address: token_address.clone(),
                 initial_liquidity: 0,
                 risk_flags: 0,
-                metadata: None,
+                metadata: ProgramMetadata {
+                    program_name: None,
+                    program_type: None,
+                    ecosystem: None,
+                    tags: Vec::new(&env),
+                    start_date: None,
+                    end_date: None,
+                    custom_fields: Vec::new(&env),
+                },
                 reference_hash: item.reference_hash.clone(),
                 archived: false,
                 archived_at: None,
@@ -1385,6 +1408,18 @@ impl ProgramEscrowContract {
             cfg.fee_enabled = e;
         }
         env.storage().instance().set(&FEE_CONFIG, &cfg);
+    }
+
+    pub fn set_lock_fee_rate(env: Env, lock_fee_rate: i128) {
+        Self::update_fee_config(env, Some(lock_fee_rate), None, None, None, None, None);
+    }
+
+    pub fn set_fees_enabled(env: Env, fee_enabled: bool) {
+        Self::update_fee_config(env, None, None, None, None, None, Some(fee_enabled));
+    }
+
+    pub fn set_fee_recipient(env: Env, fee_recipient: Address) {
+        Self::update_fee_config(env, None, None, None, None, Some(fee_recipient), None);
     }
 
     /// Check if a program exists (legacy single-program check)
@@ -1801,7 +1836,7 @@ impl ProgramEscrowContract {
             DELEGATE_PERMISSION_UPDATE_META,
         );
 
-        program_data.metadata = Some(metadata);
+        program_data.metadata = metadata;
         Self::store_program_data(&env, &program_id, &program_data);
 
         env.events().publish(
@@ -2551,7 +2586,7 @@ impl ProgramEscrowContract {
         )
     }
 
-    pub fn create_program_release_schedule_by(
+    pub fn create_release_schedule_by(
         env: Env,
         caller: Address,
         recipient: Address,
@@ -2830,6 +2865,65 @@ impl ProgramEscrowContract {
         );
 
         program_data
+    }
+
+    pub fn batch_lock(env: Env, items: Vec<LockItem>) -> u32 {
+        let count = items.len() as u32;
+        if count == 0 || count > MAX_BATCH_SIZE {
+            panic!("Invalid batch size");
+        }
+
+        for i in 0..items.len() {
+            let item = items.get(i).unwrap();
+            if item.amount <= 0 {
+                panic!("Invalid amount");
+            }
+            let program_key = DataKey::Program(item.program_id.clone());
+            if !env.storage().instance().has(&program_key) {
+                panic!("Program not found");
+            }
+        }
+
+        for i in 0..items.len() {
+            let item = items.get(i).unwrap();
+            Self::lock_program_funds_v2(env.clone(), item.program_id.clone(), item.amount);
+        }
+
+        count
+    }
+
+    pub fn batch_release(env: Env, items: Vec<ReleaseItem>) -> u32 {
+        let count = items.len() as u32;
+        if count == 0 || count > MAX_BATCH_SIZE {
+            panic!("Invalid batch size");
+        }
+
+        let schedules = Self::get_release_schedules(env.clone());
+
+        for i in 0..items.len() {
+            let item = items.get(i).unwrap();
+            let mut found = false;
+            for j in 0..schedules.len() {
+                let schedule = schedules.get(j).unwrap();
+                if schedule.schedule_id == item.schedule_id {
+                    found = true;
+                    if schedule.released {
+                        panic!("Schedule already released");
+                    }
+                    break;
+                }
+            }
+            if !found {
+                panic!("Schedule not found");
+            }
+        }
+
+        for i in 0..items.len() {
+            let item = items.get(i).unwrap();
+            Self::release_program_schedule_manual(env.clone(), item.schedule_id);
+        }
+
+        count
     }
 
     pub fn single_payout_v2(
@@ -3318,7 +3412,7 @@ impl ProgramEscrowContract {
         Self::release_program_schedule_manual_internal(env, None, schedule_id)
     }
 
-    pub fn release_program_schedule_manual_by(env: Env, caller: Address, schedule_id: u64) {
+    pub fn release_schedule_manual_by(env: Env, caller: Address, schedule_id: u64) {
         Self::release_program_schedule_manual_internal(env, Some(caller), schedule_id)
     }
 
