@@ -34,6 +34,9 @@
 use crate::CapabilityAction;
 use soroban_sdk::{contracttype, symbol_short, Address, BytesN, Env, Symbol};
 
+// Import storage key audit module for shared constants
+use grainlify_contracts::storage_key_audit::{shared, bounty_escrow as be_keys};
+
 // ── Version constant ─────────────────────────────────────────────────────────
 
 /// Canonical event schema version included in **every** event payload.
@@ -41,7 +44,7 @@ use soroban_sdk::{contracttype, symbol_short, Address, BytesN, Env, Symbol};
 /// Increment this value  and update all emitter functions whenever the
 /// payload schema changes in a breaking way.  Non-breaking additions that is new
 /// optional fields do not require a version bump.
-pub const EVENT_VERSION_V2: u32 = 2;
+pub const EVENT_VERSION_V2: u32 = shared::EVENT_VERSION_V2;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // INITIALIZATION EVENTS
@@ -88,7 +91,7 @@ pub struct BountyEscrowInitialized {
 /// # Panics
 /// Never panics; publishing is infallible in Soroban.
 pub fn emit_bounty_initialized(env: &Env, event: BountyEscrowInitialized) {
-    let topics = (symbol_short!("init"),);
+    let topics = (be_keys::BOUNTY_INITIALIZED,);
     env.events().publish(topics, event.clone());
 }
 

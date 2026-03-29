@@ -1,5 +1,91 @@
 #![no_std]
-
+//! # Bounty Escrow Smart Contract
+//!
+//! A secure escrow system for managing bounty payments and dispute resolution on Stellar.
+//! This contract enables bounty creators to lock funds and release them to contributors
+//! upon successful completion of work, with comprehensive dispute handling.
+//!
+//! ## Storage Key Namespace
+//!
+//! This contract uses the `BE_` (Bounty Escrow) namespace prefix for all storage keys
+//! and event symbols to prevent collisions with other contracts:
+//!
+//! ### Storage Keys (BE_ prefix)
+//! - `BE_Admin` - Contract administrator address
+//! - `BE_Token` - Reward token contract address
+//! - `BE_Version` - Contract version
+//! - `BE_EscrowIdx` - Global escrow index
+//! - `BE_DepositorIdx` - Depositor address index
+//! - `BE_EscrowFrz` - Escrow-level freeze records
+//! - `BE_AddrFrz` - Address-level freeze records
+//! - `BE_FeeCfg` - Fee configuration
+//! - `BE_RefundApp` - Refund approvals
+//! - `BE_Reentrancy` - Reentrancy guard state
+//! - `BE_Multisig` - Multisig configuration
+//! - `BE_ReleaseApp` - Release approvals
+//! - `BE_PendingClaim` - Pending claim records
+//! - `BE_TicketCtr` - Claim ticket counter
+//! - `BE_ClaimTicket` - Individual claim tickets
+//! - `BE_ClaimTicketIdx` - Claim ticket index
+//! - `BE_BenTickets` - Beneficiary ticket mapping
+//! - `BE_ClaimWindow` - Claim window configuration
+//! - `BE_PauseFlags` - Pause state flags
+//! - `BE_AmountPol` - Amount policy limits
+//! - `BE_CapNonce` - Capability nonce counter
+//! - `BE_Capability` - Capability token storage
+//! - `BE_NonTransRew` - Non-transferable rewards flag
+//! - `BE_DeprecationSt` - Deprecation state
+//! - `BE_PartFilter` - Participant filter mode
+//! - `BE_AnonResolver` - Anonymous escrow resolver
+//! - `BE_TokenFeeCfg` - Per-token fee configuration
+//! - `BE_ChainId` - Chain identifier
+//! - `BE_NetworkId` - Network identifier
+//! - `BE_MaintMode` - Maintenance mode flag
+//! - `BE_GasBudget` - Gas budget configuration
+//! - `BE_TimelockCfg` - Timelock configuration
+//! - `BE_PendingAction` - Pending timelock actions
+//! - `BE_ActionCtr` - Action counter
+//!
+//! ### Event Symbols (BE_ prefix)
+//! - `BE_init` - Bounty escrow initialized
+//! - `BE_f_lock` - Funds locked (regular escrow)
+//! - `BE_f_lock_anon` - Funds locked (anonymous escrow)
+//! - `BE_f_rel` - Funds released
+//! - `BE_f_ref` - Funds refunded
+//! - `BE_pub` - Escrow published
+//! - `BE_tk_issue` - Claim ticket issued
+//! - `BE_tk_claim` - Claim ticket claimed
+//! - `BE_maint` - Maintenance mode changed
+//! - `BE_pause` - Pause state changed
+//! - `BE_risk` - Risk flags updated
+//! - `BE_depr` - Deprecation state changed
+//!
+//! ### DataKey Enum Variants
+//! All `DataKey` enum variants are protected by namespace isolation:
+//! - Contract-level keys: `Admin`, `Token`, `Version`, `FeeConfig`, etc.
+//! - Escrow-scoped keys: `Escrow(u64)`, `EscrowAnon(u64)`, `Metadata(u64)`, etc.
+//! - Index keys: `EscrowIndex`, `DepositorIndex`, etc.
+//! - Address-indexed keys: `DepositorIndex(Address)`, `AddressFreeze(Address)`, etc.
+//!
+//! ## Security Guarantees
+//!
+//! 1. **Namespace Isolation**: All storage keys use `BE_` prefix
+//! 2. **Collision Prevention**: No key can collide with program-escrow (`PE_`) keys
+//! 3. **Migration Safety**: Keys are versioned and namespaced for safe upgrades
+//! 4. **Runtime Validation**: Tests enforce namespace compliance
+//! 5. **Cross-Contract Safety**: Shared constants use dedicated `shared` module
+//!
+//! ## Key Differences from Program Escrow
+//!
+//! - **Bounty Focus**: Individual escrows per bounty vs program-wide pools
+//! - **Anonymous Support**: Supports anonymous depositor commitments
+//! - **Claim Tickets**: Time-limited claim system with tickets
+//! - **Dispute Resolution**: Oracle-based dispute resolution
+//! - **Freeze System**: Both escrow-level and address-level freezes
+//! - **Capability Tokens**: Transferable claim rights
+//! - **Timelock**: Admin action delays for security
+//! - **Gas Budgets**: Per-operation gas limits
+//!
 pub mod events;
 pub mod gas_budget;
 pub mod invariants;
@@ -51,6 +137,11 @@ use soroban_sdk::xdr::{FromXdr, ToXdr};
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, token, vec, Address, Bytes,
     BytesN, Env, String, Symbol, Vec,
+};
+
+// Import storage key audit module
+use grainlify_contracts::storage_key_audit::{
+    shared, bounty_escrow as be_keys, validation, namespaces,
 };
 
 // ============================================================================
@@ -513,7 +604,7 @@ pub mod rbac {
 }
 
 #[allow(dead_code)]
-const BASIS_POINTS: i128 = 10_000;
+const BASIS_POINTS: i128 = shared::BASIS_POINTS;
 const MAX_FEE_RATE: i128 = 5_000; // 50% max fee
 const MAX_BATCH_SIZE: u32 = 20;
 
@@ -671,13 +762,13 @@ pub enum Error {
 }
 
 /// Bit flag: escrow or payout should be treated as elevated risk (indexers, UIs).
-pub const RISK_FLAG_HIGH_RISK: u32 = 1 << 0;
+pub const RISK_FLAG_HIGH_RISK: u32 = shared::RISK_FLAG_HIGH_RISK;
 /// Bit flag: manual or automated review is in progress; may restrict certain operations off-chain.
-pub const RISK_FLAG_UNDER_REVIEW: u32 = 1 << 1;
+pub const RISK_FLAG_UNDER_REVIEW: u32 = shared::RISK_FLAG_UNDER_REVIEW;
 /// Bit flag: restricted handling (e.g. compliance); informational for integrators.
-pub const RISK_FLAG_RESTRICTED: u32 = 1 << 2;
+pub const RISK_FLAG_RESTRICTED: u32 = shared::RISK_FLAG_RESTRICTED;
 /// Bit flag: aligned with soft-deprecation signaling; distinct from contract-level deprecation.
-pub const RISK_FLAG_DEPRECATED: u32 = 1 << 3;
+pub const RISK_FLAG_DEPRECATED: u32 = shared::RISK_FLAG_DEPRECATED;
 
 /// Notification preference flags (bitfield).
 pub const NOTIFY_ON_LOCK: u32 = 1 << 0;

@@ -5,6 +5,58 @@
 //! This contract enables organizers to lock funds and distribute prizes to multiple
 //! winners through secure, auditable batch payouts.
 //!
+//! ## Storage Key Namespace
+//!
+//! This contract uses the `PE_` (Program Escrow) namespace prefix for all storage keys
+//! and event symbols to prevent collisions with other contracts:
+//!
+//! ### Storage Keys (PE_ prefix)
+//! - `PE_ProgData` - Program data storage
+//! - `PE_FeeCfg` - Fee configuration
+//! - `PE_PauseFlags` - Pause state flags
+//! - `PE_MaintMode` - Maintenance mode flag
+//! - `PE_AuthIdx` - Authorization key index
+//! - `PE_Scheds` - Release schedules storage
+//! - `PE_RelHist` - Release history storage
+//! - `PE_ProgIdx` - Program index
+//! - `PE_NxtSched` - Next schedule ID
+//! - `PE_RcptID` - Receipt ID counter
+//! - `PE_FeeCol` - Fee collected tracking
+//!
+//! ### Event Symbols (PE_ prefix)
+//! - `PE_PrgInit` - Program initialized
+//! - `PE_FndsLock` - Funds locked
+//! - `PE_BatLck` - Batch funds locked
+//! - `PE_BatRel` - Batch funds released
+//! - `PE_BatchPay` - Batch payout executed
+//! - `PE_Payout` - Single payout executed
+//! - `PE_PauseSt` - Pause state changed
+//! - `PE_MaintSt` - Maintenance mode changed
+//! - `PE_ROModeChg` - Read-only mode changed
+//! - `PE_pr_risk` - Risk flags updated
+//! - `PE_PrgReg` - Program registered
+//! - `PE_PrgRgd` - Program registered (alternate)
+//! - `PE_RelSched` - Release scheduled
+//! - `PE_SchRel` - Schedule released
+//! - `PE_PrgDlgS` - Program delegate set
+//! - `PE_PrgDlgR` - Program delegate revoked
+//! - `PE_PrgMeta` - Program metadata updated
+//! - `PE_DspOpen` - Dispute opened
+//! - `PE_DspRslv` - Dispute resolved
+//!
+//! ### DataKey Enum Variants
+//! All `DataKey` enum variants are protected by namespace isolation:
+//! - Contract-level keys: `Admin`, `PauseFlags`, `MaintenanceMode`, etc.
+//! - Program-scoped keys: `Program(String)`, `ReleaseSchedule(String, u64)`, etc.
+//! - Index keys: `ProgramIndex`, `AuthKeyIndex`, etc.
+//!
+//! ## Security Guarantees
+//!
+//! 1. **Namespace Isolation**: All storage keys use `PE_` prefix
+//! 2. **Collision Prevention**: No key can collide with bounty-escrow (`BE_`) keys
+//! 3. **Migration Safety**: Keys are versioned and namespaced for safe upgrades
+//! 4. **Runtime Validation**: Tests enforce namespace compliance
+//!
 //! ## Overview
 //!
 //! The Program Escrow contract manages the complete lifecycle of hackathon/program prizes:
@@ -144,49 +196,54 @@ use soroban_sdk::{
     String, Symbol, Vec,
 };
 
+// Import storage key audit module
+use grainlify_contracts::storage_key_audit::{
+    shared, program_escrow, validation, namespaces,
+};
+
 mod metadata;
 pub use metadata::*;
 
-// Event types
-const PROGRAM_INITIALIZED: Symbol = symbol_short!("PrgInit");
-const FUNDS_LOCKED: Symbol = symbol_short!("FndsLock");
-const BATCH_FUNDS_LOCKED: Symbol = symbol_short!("BatLck");
-const BATCH_FUNDS_RELEASED: Symbol = symbol_short!("BatRel");
-const BATCH_PAYOUT: Symbol = symbol_short!("BatchPay");
-const PAYOUT: Symbol = symbol_short!("Payout");
-const EVENT_VERSION_V2: u32 = 2;
-const PAUSE_STATE_CHANGED: Symbol = symbol_short!("PauseSt");
-const MAINTENANCE_MODE_CHANGED: Symbol = symbol_short!("MaintSt");
-const READ_ONLY_MODE_CHANGED: Symbol = symbol_short!("ROModeChg");
-const PROGRAM_RISK_FLAGS_UPDATED: Symbol = symbol_short!("pr_risk");
-const PROGRAM_REGISTRY: Symbol = symbol_short!("ProgReg");
-const PROGRAM_REGISTERED: Symbol = symbol_short!("ProgRgd");
-const RELEASE_SCHEDULED: Symbol = symbol_short!("RelSched");
-const SCHEDULE_RELEASED: Symbol = symbol_short!("SchRel");
-const PROGRAM_DELEGATE_SET: Symbol = symbol_short!("PrgDlgS");
-const PROGRAM_DELEGATE_REVOKED: Symbol = symbol_short!("PrgDlgR");
-const PROGRAM_METADATA_UPDATED: Symbol = symbol_short!("PrgMeta");
+// Event types - using namespace-protected symbols
+const PROGRAM_INITIALIZED: Symbol = program_escrow::PROGRAM_INITIALIZED;
+const FUNDS_LOCKED: Symbol = program_escrow::FUNDS_LOCKED;
+const BATCH_FUNDS_LOCKED: Symbol = program_escrow::BATCH_FUNDS_LOCKED;
+const BATCH_FUNDS_RELEASED: Symbol = program_escrow::BATCH_FUNDS_RELEASED;
+const BATCH_PAYOUT: Symbol = program_escrow::BATCH_PAYOUT;
+const PAYOUT: Symbol = program_escrow::PAYOUT;
+const EVENT_VERSION_V2: u32 = shared::EVENT_VERSION_V2;
+const PAUSE_STATE_CHANGED: Symbol = program_escrow::PAUSE_STATE_CHANGED;
+const MAINTENANCE_MODE_CHANGED: Symbol = program_escrow::MAINTENANCE_MODE_CHANGED;
+const READ_ONLY_MODE_CHANGED: Symbol = program_escrow::READ_ONLY_MODE_CHANGED;
+const PROGRAM_RISK_FLAGS_UPDATED: Symbol = program_escrow::PROGRAM_RISK_FLAGS_UPDATED;
+const PROGRAM_REGISTRY: Symbol = program_escrow::PROGRAM_REGISTRY;
+const PROGRAM_REGISTERED: Symbol = program_escrow::PROGRAM_REGISTERED;
+const RELEASE_SCHEDULED: Symbol = program_escrow::RELEASE_SCHEDULED;
+const SCHEDULE_RELEASED: Symbol = program_escrow::SCHEDULE_RELEASED;
+const PROGRAM_DELEGATE_SET: Symbol = program_escrow::PROGRAM_DELEGATE_SET;
+const PROGRAM_DELEGATE_REVOKED: Symbol = program_escrow::PROGRAM_DELEGATE_REVOKED;
+const PROGRAM_METADATA_UPDATED: Symbol = program_escrow::PROGRAM_METADATA_UPDATED;
 
-// Storage keys
-const PROGRAM_DATA: Symbol = symbol_short!("ProgData");
-const RECEIPT_ID: Symbol = symbol_short!("RcptID");
-const SCHEDULES: Symbol = symbol_short!("Scheds");
-const RELEASE_HISTORY: Symbol = symbol_short!("RelHist");
-const NEXT_SCHEDULE_ID: Symbol = symbol_short!("NxtSched");
-const PROGRAM_INDEX: Symbol = symbol_short!("ProgIdx");
-const AUTH_KEY_INDEX: Symbol = symbol_short!("AuthIdx");
-const FEE_CONFIG: Symbol = symbol_short!("FeeCfg");
-const FEE_COLLECTED: Symbol = symbol_short!("FeeCol");
+// Storage keys - using namespace-protected symbols
+const PROGRAM_DATA: Symbol = program_escrow::PROGRAM_DATA;
+const RECEIPT_ID: Symbol = program_escrow::RECEIPT_ID;
+const SCHEDULES: Symbol = program_escrow::SCHEDULES;
+const RELEASE_HISTORY: Symbol = program_escrow::RELEASE_HISTORY;
+const NEXT_SCHEDULE_ID: Symbol = program_escrow::NEXT_SCHEDULE_ID;
+const PROGRAM_INDEX: Symbol = program_escrow::PROGRAM_INDEX;
+const AUTH_KEY_INDEX: Symbol = program_escrow::AUTH_KEY_INDEX;
+const FEE_CONFIG: Symbol = program_escrow::FEE_CONFIG;
+const FEE_COLLECTED: Symbol = program_escrow::FEE_COLLECTED;
 
 // Fee rate is stored in basis points (1 basis point = 0.01%)
 // Example: 100 basis points = 1%, 1000 basis points = 10%
-const BASIS_POINTS: i128 = 10_000;
+const BASIS_POINTS: i128 = shared::BASIS_POINTS;
 const MAX_FEE_RATE: i128 = 1_000; // Maximum 10% fee
 
-pub const RISK_FLAG_HIGH_RISK: u32 = 1 << 0;
-pub const RISK_FLAG_UNDER_REVIEW: u32 = 1 << 1;
-pub const RISK_FLAG_RESTRICTED: u32 = 1 << 2;
-pub const RISK_FLAG_DEPRECATED: u32 = 1 << 3;
+pub const RISK_FLAG_HIGH_RISK: u32 = shared::RISK_FLAG_HIGH_RISK;
+pub const RISK_FLAG_UNDER_REVIEW: u32 = shared::RISK_FLAG_UNDER_REVIEW;
+pub const RISK_FLAG_RESTRICTED: u32 = shared::RISK_FLAG_RESTRICTED;
+pub const RISK_FLAG_DEPRECATED: u32 = shared::RISK_FLAG_DEPRECATED;
 pub const STORAGE_SCHEMA_VERSION: u32 = 1;
 pub const DELEGATE_PERMISSION_RELEASE: u32 = 1 << 0;
 pub const DELEGATE_PERMISSION_REFUND: u32 = 1 << 1;
@@ -536,9 +593,9 @@ pub struct DisputeResolvedEvent {
     pub resolved_at: u64,
 }
 
-// Event symbols for dispute lifecycle
-const DISPUTE_OPENED: Symbol = symbol_short!("DspOpen");
-const DISPUTE_RESOLVED: Symbol = symbol_short!("DspRslv");
+// Event symbols for dispute lifecycle - using namespace-protected symbols
+const DISPUTE_OPENED: Symbol = program_escrow::DISPUTE_OPENED;
+const DISPUTE_RESOLVED: Symbol = program_escrow::DISPUTE_RESOLVED;
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
