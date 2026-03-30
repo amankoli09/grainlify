@@ -3247,6 +3247,12 @@ impl BountyEscrowContract {
 
     /// Locks funds for a bounty and records escrow state.
     ///
+    /// # Invariants Verified
+    /// - INV-ESC-1: amount >= 0
+    /// - INV-ESC-2: remaining_amount >= 0
+    /// - INV-ESC-3: remaining_amount <= amount
+    /// - INV-ESC-7: Aggregate fund conservation (sum(active) == contract.balance)
+    ///
     /// # Security
     /// - Validation order is deterministic to avoid ambiguous failure behavior under contention.
     /// - Reentrancy guard is acquired before validation and released on completion.
@@ -3814,6 +3820,21 @@ impl BountyEscrowContract {
         Ok(())
     }
 
+    /// Releases escrowed funds to a contributor.
+    ///
+    /// # Invariants Verified
+    /// - INV-ESC-4: Released => remaining_amount == 0
+    /// - INV-ESC-7: Aggregate fund conservation (sum(active) == contract.balance)
+    ///
+    /// # Access Control
+    /// Admin-only.
+    ///
+    /// # Front-running Behavior
+    /// First valid release for a bounty transitions state to `Released`. Later release/refund/claim
+    /// races against that bounty must fail with `Error::FundsNotLocked`.
+    ///
+    /// # Security
+    /// Reentrancy guard is always cleared before any explicit error return after acquisition.
     pub fn release_funds(env: Env, bounty_id: u64, contributor: Address) -> Result<(), Error> {
         let caller = env
             .storage()
@@ -4474,6 +4495,12 @@ impl BountyEscrowContract {
 
     /// Releases a partial amount of locked funds.
     ///
+    /// # Invariants Verified
+    /// - INV-ESC-2: remaining_amount >= 0
+    /// - INV-ESC-3: remaining_amount <= amount
+    /// - INV-ESC-6: Fund conservation (amount = released + refunded + remaining)
+    /// - INV-ESC-7: Aggregate fund conservation (sum(active) == contract.balance)
+    ///
     /// # Access Control
     /// Admin-only.
     ///
@@ -4570,6 +4597,11 @@ impl BountyEscrowContract {
     }
 
     /// Refunds remaining funds when refund conditions are met.
+    ///
+    /// # Invariants Verified
+    /// - INV-ESC-5: Refunded => remaining_amount == 0
+    /// - INV-ESC-8: Refund consistency (sum(refund_history) <= consumed)
+    /// - INV-ESC-7: Aggregate fund conservation (sum(active) == contract.balance)
     ///
     /// # Authorization
     /// Refund execution requires authenticated authorization from the contract admin
