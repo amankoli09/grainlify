@@ -73,6 +73,11 @@ use soroban_sdk::{
     BytesN, Env, String, Symbol, Vec,
 };
 
+// Import storage key audit module
+use grainlify_contracts::storage_key_audit::{
+    shared, bounty_escrow as be_keys, validation, namespaces,
+};
+
 // ============================================================================
 // INPUT VALIDATION MODULE
 // ============================================================================
@@ -533,7 +538,7 @@ pub mod rbac {
 }
 
 #[allow(dead_code)]
-const BASIS_POINTS: i128 = 10_000;
+const BASIS_POINTS: i128 = shared::BASIS_POINTS;
 const MAX_FEE_RATE: i128 = 5_000; // 50% max fee
 const MAX_BATCH_SIZE: u32 = 20;
 
@@ -721,13 +726,13 @@ pub enum Error {
 }
 
 /// Bit flag: escrow or payout should be treated as elevated risk (indexers, UIs).
-pub const RISK_FLAG_HIGH_RISK: u32 = 1 << 0;
+pub const RISK_FLAG_HIGH_RISK: u32 = shared::RISK_FLAG_HIGH_RISK;
 /// Bit flag: manual or automated review is in progress; may restrict certain operations off-chain.
-pub const RISK_FLAG_UNDER_REVIEW: u32 = 1 << 1;
+pub const RISK_FLAG_UNDER_REVIEW: u32 = shared::RISK_FLAG_UNDER_REVIEW;
 /// Bit flag: restricted handling (e.g. compliance); informational for integrators.
-pub const RISK_FLAG_RESTRICTED: u32 = 1 << 2;
+pub const RISK_FLAG_RESTRICTED: u32 = shared::RISK_FLAG_RESTRICTED;
 /// Bit flag: aligned with soft-deprecation signaling; distinct from contract-level deprecation.
-pub const RISK_FLAG_DEPRECATED: u32 = 1 << 3;
+pub const RISK_FLAG_DEPRECATED: u32 = shared::RISK_FLAG_DEPRECATED;
 
 /// Notification preference flags (bitfield).
 pub const NOTIFY_ON_LOCK: u32 = 1 << 0;
