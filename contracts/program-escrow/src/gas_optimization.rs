@@ -5,9 +5,7 @@
 //! - Optimized storage access patterns
 //! - Reduced redundant computations
 
-use soroban_sdk::{vec, Address, Env, String, Symbol, Vec};
-#[cfg(test)]
-use soroban_sdk::testutils::storage::Instance;
+use soroban_sdk::{vec, Env, String, Vec};
 
 /// Optimized batch lock processing with cached program data.
 pub fn optimized_batch_lock<F>(
@@ -103,7 +101,7 @@ pub mod storage_efficiency {
     use soroban_sdk::{Env, Symbol};
     
     /// Extend TTL for frequently accessed data.
-    pub fn extend_storage_ttl(env: &Env, key: &Symbol, ttl_threshold: u32) {
+    pub fn extend_storage_ttl(env: &Env, _key: &Symbol, ttl_threshold: u32) {
         env.storage().instance().extend_ttl(ttl_threshold, ttl_threshold);
     }
     
@@ -184,7 +182,8 @@ pub mod efficient_math {
     
     /// Safe subtraction that returns 0 on underflow.
     pub fn safe_sub_zero(a: i128, b: i128) -> i128 {
-        a.checked_sub(b).unwrap_or(0)
+        let result = a.checked_sub(b).unwrap_or(0);
+        if result < 0 { 0 } else { result }
     }
     
     /// Clamp value between min and max.
@@ -201,7 +200,7 @@ pub mod efficient_math {
 
 /// Event emission helpers to reduce storage writes.
 pub mod event_helpers {
-    use soroban_sdk::{symbol_short, Address, Env, String, Symbol};
+    use soroban_sdk::{symbol_short, Env, Symbol};
     
     /// Emit a lightweight event instead of storing state.
     pub fn emit_operation(env: &Env, operation: Symbol, data: u64) {
