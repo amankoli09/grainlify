@@ -101,10 +101,10 @@ pub mod storage_efficiency {
     use soroban_sdk::{Env, Symbol};
     
     /// Extend TTL for frequently accessed data.
-    pub fn extend_storage_ttl(env: &Env, key: &Symbol, ttl_threshold: u32) {
-        let current_ttl = env.storage().instance().get_ttl(key);
+    pub fn extend_storage_ttl(env: &Env, _key: &Symbol, ttl_threshold: u32) {
+        let current_ttl = env.storage().instance().get_ttl();
         if current_ttl < ttl_threshold {
-            env.storage().instance().extend_ttl(key, ttl_threshold, ttl_threshold);
+            env.storage().instance().extend_ttl(ttl_threshold, ttl_threshold);
         }
     }
     
