@@ -1460,6 +1460,7 @@ impl BountyEscrowContract {
             events::emit_fee_collected(
                 env,
                 events::FeeCollected {
+                    version: events::EVENT_VERSION_V2,
                     operation_type: operation_type.clone(),
                     amount: fee_amount,
                     fee_rate,
@@ -1487,6 +1488,7 @@ impl BountyEscrowContract {
             events::emit_fee_collected(
                 env,
                 events::FeeCollected {
+                    version: events::EVENT_VERSION_V2,
                     operation_type: operation_type.clone(),
                     amount: fee_amount,
                     fee_rate,
@@ -1520,6 +1522,7 @@ impl BountyEscrowContract {
                 events::emit_fee_collected(
                     env,
                     events::FeeCollected {
+                        version: events::EVENT_VERSION_V2,
                         operation_type: operation_type.clone(),
                         amount: share,
                         fee_rate,
@@ -1602,6 +1605,7 @@ impl BountyEscrowContract {
         events::emit_fee_config_updated(
             &env,
             events::FeeConfigUpdated {
+                version: events::EVENT_VERSION_V2,
                 lock_fee_rate: fee_config.lock_fee_rate,
                 release_fee_rate: fee_config.release_fee_rate,
                 lock_fixed_fee: fee_config.lock_fixed_fee,
@@ -1789,6 +1793,7 @@ impl BountyEscrowContract {
             events::emit_emergency_withdraw(
                 &env,
                 events::EmergencyWithdrawEvent {
+                    version: events::EVENT_VERSION_V2,
                     admin,
                     recipient: target,
                     amount: balance,
@@ -2527,6 +2532,7 @@ impl BountyEscrowContract {
         events::emit_fee_config_updated(
             &env,
             events::FeeConfigUpdated {
+                version: events::EVENT_VERSION_V2,
                 lock_fee_rate: fee_config.lock_fee_rate,
                 release_fee_rate: fee_config.release_fee_rate,
                 lock_fixed_fee: fee_config.lock_fixed_fee,
@@ -3511,6 +3517,7 @@ impl BountyEscrowContract {
         events::emit_approval_added(
             &env,
             events::ApprovalAdded {
+                version: events::EVENT_VERSION_V2,
                 bounty_id,
                 contributor: contributor.clone(),
                 approver,

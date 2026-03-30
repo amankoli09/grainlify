@@ -339,6 +339,7 @@ pub enum FeeOperationType {
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct FeeCollected {
+    pub version: u32,
     pub operation_type: FeeOperationType, // determines if the fee was collected on lock or release.
     pub amount: i128,                     // actual fee amount transferred
     pub fee_rate: i128,                   // fee rate applied in basis points (1 bp = 0.01 %).
@@ -374,6 +375,7 @@ pub fn emit_fee_collected(env: &Env, event: FeeCollected) {
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct BatchFundsLocked {
+    pub version: u32,
     pub count: u32,         //  numbers of escrows created in this batch.
     pub total_amount: i128, // the sum of all locked amounts in this batch.
     pub timestamp: u64,
@@ -396,6 +398,7 @@ pub fn emit_batch_funds_locked(env: &Env, event: BatchFundsLocked) {
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct FeeConfigUpdated {
+    pub version: u32,
     /// New lock fee rate in basis points.
     pub lock_fee_rate: i128,
     /// New release fee rate in basis points.
@@ -450,6 +453,7 @@ pub fn emit_archived(env: &Env, bounty_id: u64, timestamp: u64) {
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct FeeRoutingUpdated {
+    pub version: u32,
     /// Bounty this routing config applies to.
     pub bounty_id: u64,
     /// Primary treasury recipient.
@@ -482,6 +486,7 @@ pub fn emit_fee_routing_updated(env: &Env, event: FeeRoutingUpdated) {
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct FeeRouted {
+    pub version: u32,
     /// Bounty this fee was collected for.
     pub bounty_id: u64,
     /// Whether this was a lock or release fee.
@@ -522,6 +527,7 @@ pub fn emit_fee_routed(env: &Env, event: FeeRouted) {
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct BatchFundsReleased {
+    pub version: u32,
     pub count: u32,
     pub total_amount: i128,
     pub timestamp: u64,
@@ -549,6 +555,7 @@ pub fn emit_batch_funds_released(env: &Env, event: BatchFundsReleased) {
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct ApprovalAdded {
+    pub version: u32,
     pub bounty_id: u64,       // requiring multisig approval.
     pub contributor: Address, // intended contributor recipient
     pub approver: Address,    // signer who submitted this approval
@@ -939,6 +946,7 @@ pub fn emit_pause_state_changed(env: &Env, event: crate::PauseStateChanged) {
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct EmergencyWithdrawEvent {
+    pub version: u32,
     pub admin: Address,
     pub recipient: Address,
     pub amount: i128,
