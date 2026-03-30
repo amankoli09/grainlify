@@ -29,8 +29,7 @@ fn generate_candidates(env: &Env, count: u32) -> SorobanVec<Address> {
     for i in 0..count {
         let mut addr_bytes = [0u8; 32];
         addr_bytes[0] = i as u8;
-        let addr =
-            Address::try_from_val(env, &ScAddress::Contract(Hash(addr_bytes))).unwrap();
+        let addr = Address::try_from_val(env, &ScAddress::Contract(Hash(addr_bytes))).unwrap();
         candidates.push_back(addr);
     }
     candidates
@@ -49,7 +48,7 @@ fn test_context(env: &Env, context: &str) -> Bytes {
 fn test_deterministic_behavior_same_inputs() {
     let env = Env::default();
 
-    let domain = Symbol::new(&env,TEST_DOMAIN);
+    let domain = Symbol::new(&env, TEST_DOMAIN);
     let context = test_context(&env, "test_context");
     let seed = test_seed(&env, 42);
     let candidates = generate_candidates(&env, 5);
@@ -83,7 +82,7 @@ fn test_deterministic_behavior_same_inputs() {
 fn test_deterministic_behavior_different_seeds() {
     let env = Env::default();
 
-    let domain = Symbol::new(&env,TEST_DOMAIN);
+    let domain = Symbol::new(&env, TEST_DOMAIN);
     let context = test_context(&env, "test_context");
     let candidates = generate_candidates(&env, 5);
 
@@ -109,7 +108,7 @@ fn test_deterministic_behavior_different_seeds() {
 fn test_deterministic_behavior_different_contexts() {
     let env = Env::default();
 
-    let domain = Symbol::new(&env,TEST_DOMAIN);
+    let domain = Symbol::new(&env, TEST_DOMAIN);
     let seed = test_seed(&env, 42);
     let candidates = generate_candidates(&env, 5);
 
@@ -141,8 +140,8 @@ fn test_deterministic_behavior_different_domains() {
     let candidates = generate_candidates(&env, 5);
 
     // Test with different domains
-    let domain1 = Symbol::new(&env,"domain1");
-    let domain2 = Symbol::new(&env,"domain2");
+    let domain1 = Symbol::new(&env, "domain1");
+    let domain2 = Symbol::new(&env, "domain2");
 
     let result1 = derive_selection(&env, &domain1, &context, &seed, &candidates);
     let result2 = derive_selection(&env, &domain2, &context, &seed, &candidates);
@@ -167,7 +166,7 @@ fn test_deterministic_behavior_different_domains() {
 fn test_empty_candidates_returns_none() {
     let env = Env::default();
 
-    let domain = Symbol::new(&env,TEST_DOMAIN);
+    let domain = Symbol::new(&env, TEST_DOMAIN);
     let context = test_context(&env, "test_context");
     let seed = test_seed(&env, 42);
     let empty_candidates = SorobanVec::new(&env);
@@ -181,7 +180,7 @@ fn test_empty_candidates_returns_none() {
 fn test_single_candidate_always_wins() {
     let env = Env::default();
 
-    let domain = Symbol::new(&env,TEST_DOMAIN);
+    let domain = Symbol::new(&env, TEST_DOMAIN);
     let context = test_context(&env, "test_context");
     let seed = test_seed(&env, 42);
     let candidates = generate_candidates(&env, 1);
@@ -197,7 +196,7 @@ fn test_single_candidate_always_wins() {
 fn test_two_candidates_deterministic() {
     let env = Env::default();
 
-    let domain = Symbol::new(&env,TEST_DOMAIN);
+    let domain = Symbol::new(&env, TEST_DOMAIN);
     let context = test_context(&env, "test_context");
     let seed = test_seed(&env, 42);
     let candidates = generate_candidates(&env, 2);
@@ -221,7 +220,7 @@ fn test_two_candidates_deterministic() {
 fn test_uniform_distribution_large_candidate_pool() {
     let env = Env::default();
 
-    let domain = Symbol::new(&env,"distribution_test");
+    let domain = Symbol::new(&env, "distribution_test");
     let context = test_context(&env, "statistical_test");
     let candidates = generate_candidates(&env, 100); // Large candidate pool
 
@@ -263,7 +262,7 @@ fn test_uniform_distribution_large_candidate_pool() {
 fn test_seed_sensitivity_high_entropy() {
     let env = Env::default();
 
-    let domain = Symbol::new(&env,"sensitivity_test");
+    let domain = Symbol::new(&env, "sensitivity_test");
     let context = test_context(&env, "entropy_test");
     let candidates = generate_candidates(&env, 10);
 
@@ -300,7 +299,7 @@ fn test_seed_sensitivity_high_entropy() {
 fn test_candidate_order_independence() {
     let env = Env::default();
 
-    let domain = Symbol::new(&env,"order_test");
+    let domain = Symbol::new(&env, "order_test");
     let context = test_context(&env, "order_independence");
     let seed = test_seed(&env, 42);
 
@@ -341,7 +340,7 @@ fn test_candidate_order_independence() {
 fn test_candidate_stuffing_simulation() {
     let env = Env::default();
 
-    let domain = Symbol::new(&env,"stuffing_test");
+    let domain = Symbol::new(&env, "stuffing_test");
     let context = test_context(&env, "candidate_stuffing");
     let seed = test_seed(&env, 42);
 
@@ -357,8 +356,7 @@ fn test_candidate_stuffing_simulation() {
     for i in 10..50 {
         let mut addr_bytes = [0u8; 32];
         addr_bytes[0] = (i % 10) as u8; // Create similar addresses
-        let addr =
-            Address::try_from_val(&env, &ScAddress::Contract(Hash(addr_bytes))).unwrap();
+        let addr = Address::try_from_val(&env, &ScAddress::Contract(Hash(addr_bytes))).unwrap();
         stuffed_candidates.push_back(addr);
     }
 
@@ -382,7 +380,7 @@ fn test_candidate_stuffing_simulation() {
 fn test_seed_grinding_simulation() {
     let env = Env::default();
 
-    let domain = Symbol::new(&env,"grinding_test");
+    let domain = Symbol::new(&env, "grinding_test");
     let context = test_context(&env, "seed_grinding");
     let candidates = generate_candidates(&env, 5);
 
@@ -422,7 +420,7 @@ fn test_seed_grinding_simulation() {
 fn test_performance_large_candidate_pool() {
     let env = Env::default();
 
-    let domain = Symbol::new(&env,"performance_test");
+    let domain = Symbol::new(&env, "performance_test");
     let context = test_context(&env, "performance");
     let seed = test_seed(&env, 42);
 
@@ -462,7 +460,7 @@ fn test_performance_large_candidate_pool() {
 fn test_audit_trail_completeness() {
     let env = Env::default();
 
-    let domain = Symbol::new(&env,"audit_test");
+    let domain = Symbol::new(&env, "audit_test");
     let context = test_context(&env, "audit_trail");
     let seed = test_seed(&env, 42);
     let candidates = generate_candidates(&env, 5);
@@ -510,8 +508,8 @@ fn test_cross_domain_isolation() {
     let candidates = generate_candidates(&env, 5);
 
     // Test with different domains to ensure isolation
-    let domain1 = Symbol::new(&env,"lottery");
-    let domain2 = Symbol::new(&env,"auction");
+    let domain1 = Symbol::new(&env, "lottery");
+    let domain2 = Symbol::new(&env, "auction");
 
     let result1 = derive_selection(&env, &domain1, &context, &seed, &candidates);
     let result2 = derive_selection(&env, &domain2, &context, &seed, &candidates);
@@ -541,7 +539,7 @@ fn test_cross_domain_isolation() {
 fn test_malformed_inputs_handling() {
     let env = Env::default();
 
-    let domain = Symbol::new(&env,TEST_DOMAIN);
+    let domain = Symbol::new(&env, TEST_DOMAIN);
     let candidates = generate_candidates(&env, 3);
 
     // Test with empty context
@@ -567,8 +565,8 @@ fn test_reproducibility_across_environments() {
     let env1 = Env::default();
     let env2 = Env::default();
 
-    let domain = Symbol::new(&env1,TEST_DOMAIN);
-    let domain2 = Symbol::new(&env2,TEST_DOMAIN);
+    let domain = Symbol::new(&env1, TEST_DOMAIN);
+    let domain2 = Symbol::new(&env2, TEST_DOMAIN);
     let context = test_context(&env1, "reproducibility_test");
     let context2 = test_context(&env2, "reproducibility_test");
     let seed = test_seed(&env1, 123);
@@ -580,8 +578,7 @@ fn test_reproducibility_across_environments() {
     for i in 0..5u8 {
         let mut addr_bytes = [0u8; 32];
         addr_bytes[0] = i;
-        let addr =
-            Address::try_from_val(&env2, &ScAddress::Contract(Hash(addr_bytes))).unwrap();
+        let addr = Address::try_from_val(&env2, &ScAddress::Contract(Hash(addr_bytes))).unwrap();
         candidates2.push_back(addr);
     }
 

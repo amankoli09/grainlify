@@ -467,4 +467,3 @@ impl GovernanceContract {
             .ok_or(Error::NotInitialized)
     }
 }
-

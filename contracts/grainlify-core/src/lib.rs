@@ -1999,11 +1999,7 @@ impl GrainlifyContract {
 
     /// Returns aggregated rollback intelligence for operators.
     pub fn get_rollback_info(env: Env) -> RollbackInfo {
-        let current_version: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::Version)
-            .unwrap_or(0);
+        let current_version: u32 = env.storage().instance().get(&DataKey::Version).unwrap_or(0);
         let previous_version: u32 = env
             .storage()
             .instance()
@@ -2011,12 +2007,13 @@ impl GrainlifyContract {
             .unwrap_or(0);
         let rollback_available = previous_version > 0;
 
-        let migration_state: Option<MigrationState> = env
-            .storage()
-            .instance()
-            .get(&DataKey::MigrationState);
+        let migration_state: Option<MigrationState> =
+            env.storage().instance().get(&DataKey::MigrationState);
         let has_migration = migration_state.is_some();
-        let migration_from_version = migration_state.as_ref().map(|m| m.from_version).unwrap_or(0);
+        let migration_from_version = migration_state
+            .as_ref()
+            .map(|m| m.from_version)
+            .unwrap_or(0);
         let migration_to_version = migration_state.as_ref().map(|m| m.to_version).unwrap_or(0);
         let migration_timestamp = migration_state.as_ref().map(|m| m.migrated_at).unwrap_or(0);
 
