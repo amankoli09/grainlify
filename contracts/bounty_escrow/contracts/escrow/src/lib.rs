@@ -3557,7 +3557,7 @@ impl BountyEscrowContract {
     }
 
     pub fn release_funds(env: Env, bounty_id: u64, contributor: Address) -> Result<(), Error> {
-        let caller = env
+        let _caller = env
             .storage()
             .instance()
             .get::<DataKey, Address>(&DataKey::Admin)
@@ -4242,7 +4242,7 @@ impl BountyEscrowContract {
         admin.require_auth();
         // Snapshot resource meters for gas cap enforcement (test / testutils only).
         #[cfg(any(test, feature = "testutils"))]
-        let gas_snapshot = gas_budget::capture(&env);
+        let _gas_snapshot = gas_budget::capture(&env);
 
         if !env.storage().persistent().has(&DataKey::Escrow(bounty_id)) {
             return Err(Error::BountyNotFound);
