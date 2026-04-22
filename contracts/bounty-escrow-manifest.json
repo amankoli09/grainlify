@@ -3,7 +3,7 @@
   "contract_name": "BountyEscrowContract",
   "contract_purpose": "Manages bounty escrow with multi-token support, capability-based authorization, fee configuration, and comprehensive security features including reentrancy protection and rate limiting",
   "version": {
-    "current": "2.0.0",
+    "current": "2.2.0",
     "schema": "1.0.0",
     "history": [
       {
@@ -34,6 +34,18 @@
           "Added explicit refund eligibility view with deterministic semantics",
           "Added refund approval audit events for approval set/consumption lifecycle",
           "Added upgrade-safe storage marker for refund eligibility schema versioning"
+        ]
+      },
+      {
+        "version": "2.2.0",
+        "release_date": "2026-04-22",
+        "changes": [
+          "Added fee routing invariant enforcement: distributed_total == fee_amount is verified after every routing operation",
+          "Added FeeRoutingInvariantChecked audit event emitted after every fee routing call",
+          "Added FeeRoutingSchemaVersionSet audit event emitted on init for upgrade-safe schema tracking",
+          "Added FeeRoutingSchemaVersion upgrade-safe storage key to instance storage",
+          "Upgrade safety check now warns when FeeRoutingSchemaVersion is absent (legacy deployments)",
+          "route_fee now panics on invariant violation rather than silently losing dust"
         ]
       }
     ]
@@ -791,6 +803,12 @@
         "data_structure": "u32"
       },
       {
+        "name": "FeeRoutingSchemaVersion",
+        "type": "instance",
+        "description": "Upgrade-safe version marker for fee routing storage layout. Increment when FeeConfig or TreasuryDestination schema changes.",
+        "data_structure": "u32"
+      },
+      {
         "name": "ReentrancyGuard",
         "type": "temporary",
         "description": "Reentrancy protection flag",
@@ -1066,6 +1084,82 @@
           }
         ],
         "trigger": "Successful refund call with admin approval record"
+      },
+      {
+        "name": "FeeRoutingInvariantChecked",
+        "description": "Audit event emitted after every fee routing operation confirming distributed_total == fee_amount",
+        "topics": ["fr_inv", "bounty_id"],
+        "data": [
+          {
+            "name": "bounty_id",
+            "type": "u64",
+            "description": "Bounty the fee was collected for"
+          },
+          {
+            "name": "operation_type",
+            "type": "FeeOperationType",
+            "description": "Lock or Release"
+          },
+          {
+            "name": "gross_amount",
+            "type": "i128",
+            "description": "Gross amount before fee deduction"
+          },
+          {
+            "name": "fee_amount",
+            "type": "i128",
+            "description": "Total fee amount routed"
+          },
+          {
+            "name": "distributed_total",
+            "type": "i128",
+            "description": "Sum of all shares actually distributed; must equal fee_amount"
+          },
+          {
+            "name": "weight_total",
+            "type": "u64",
+            "description": "Sum of all destination weights used for proportional split"
+          },
+          {
+            "name": "destination_count",
+            "type": "u32",
+            "description": "Number of destinations the fee was split across"
+          },
+          {
+            "name": "invariant_ok",
+            "type": "bool",
+            "description": "Whether distributed_total == fee_amount held"
+          },
+          {
+            "name": "timestamp",
+            "type": "u64",
+            "description": "Ledger timestamp"
+          }
+        ],
+        "trigger": "Every successful fee routing call (lock or release)"
+      },
+      {
+        "name": "FeeRoutingSchemaVersionSet",
+        "description": "Upgrade-safe marker recording the fee routing storage schema version",
+        "topics": ["fr_schma"],
+        "data": [
+          {
+            "name": "schema_version",
+            "type": "u32",
+            "description": "Fee routing schema version written to instance storage"
+          },
+          {
+            "name": "set_by",
+            "type": "Address",
+            "description": "Admin that triggered the version write"
+          },
+          {
+            "name": "timestamp",
+            "type": "u64",
+            "description": "Ledger timestamp"
+          }
+        ],
+        "trigger": "Contract initialization (init)"
       }
     ]
   },

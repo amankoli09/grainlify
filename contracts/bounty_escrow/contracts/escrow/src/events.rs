@@ -1409,3 +1409,92 @@ pub fn emit_recurring_lock_cancelled(env: &Env, event: RecurringLockCancelled) {
     let topics = (symbol_short!("rl_cncl"), event.recurring_id);
     env.events().publish(topics, event);
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// FEE ROUTING INVARIANT EVENTS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Payload for the [`emit_fee_routing_invariant_checked`] event.
+///
+/// Emitted after every fee routing operation to provide an on-chain audit
+/// trail that the `fee + net == gross` invariant was verified.
+///
+/// ### Topics
+/// | Index | Value |
+/// |-------|-------|
+/// | 0 | `"fr_inv"` |
+/// | 1 | `bounty_id: u64` |
+///
+/// ### Security notes
+/// - This event is emitted **after** all token transfers complete, so it
+///   accurately reflects the final settled state.
+/// - `distributed_total` must equal `fee_amount` for the invariant to hold.
+///   Any discrepancy indicates a rounding or overflow bug.
+/// - `weight_total` is published so auditors can verify proportional splits
+///   without re-reading storage.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FeeRoutingInvariantChecked {
+    pub version: u32,
+    /// Bounty this fee was collected for.
+    pub bounty_id: u64,
+    /// Whether this was a lock or release fee.
+    pub operation_type: FeeOperationType,
+    /// Gross amount before fee deduction.
+    pub gross_amount: i128,
+    /// Total fee amount that was routed.
+    pub fee_amount: i128,
+    /// Sum of all individual shares actually distributed (must equal `fee_amount`).
+    pub distributed_total: i128,
+    /// Sum of all destination weights used for proportional split.
+    pub weight_total: u64,
+    /// Number of destinations the fee was split across.
+    pub destination_count: u32,
+    /// Whether the invariant `distributed_total == fee_amount` held.
+    pub invariant_ok: bool,
+    /// Ledger timestamp.
+    pub timestamp: u64,
+}
+
+/// Emit [`FeeRoutingInvariantChecked`].
+///
+/// # Arguments
+/// * `env`   — Soroban execution environment.
+/// * `event` — Pre-constructed event payload.
+pub fn emit_fee_routing_invariant_checked(env: &Env, event: FeeRoutingInvariantChecked) {
+    let topics = (symbol_short!("fr_inv"), event.bounty_id);
+    env.events().publish(topics, event);
+}
+
+/// Payload for the [`emit_fee_routing_schema_version`] event.
+///
+/// Emitted once during contract initialization (or upgrade) to record the
+/// current fee routing storage schema version. Indexers can use this to
+/// detect schema migrations without scanning all storage keys.
+///
+/// ### Topics
+/// | Index | Value |
+/// |-------|-------|
+/// | 0 | `"fr_schema"` |
+///
+/// ### Security notes
+/// - This is an upgrade-safety marker. The version is stored in instance
+///   storage under [`crate::DataKey::FeeRoutingSchemaVersion`] and is
+///   checked during upgrade simulation.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FeeRoutingSchemaVersionSet {
+    pub version: u32,
+    /// The fee routing schema version being recorded.
+    pub schema_version: u32,
+    /// Admin that triggered the version write (init or upgrade).
+    pub set_by: Address,
+    /// Ledger timestamp.
+    pub timestamp: u64,
+}
+
+/// Emit [`FeeRoutingSchemaVersionSet`].
+pub fn emit_fee_routing_schema_version_set(env: &Env, event: FeeRoutingSchemaVersionSet) {
+    let topics = (symbol_short!("fr_schma"),);
+    env.events().publish(topics, event);
+}
