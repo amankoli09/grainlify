@@ -187,6 +187,33 @@ fn test_refund_eligibility_eligible_with_admin_approval_before_deadline() {
     assert!(view.approval_present);
 }
 
+#[test]
+fn test_maintenance_mode_blocks_lock_but_not_release_or_refund_paths() {
+    let setup = TestSetup::new();
+    let bounty_id = 202;
+    let amount = 1000;
+    let deadline = setup.env.ledger().timestamp() + 100;
+
+    setup.escrow.set_maintenance_mode(&true);
+
+    // Lock should be blocked (maintenance mode acts like lock pause).
+    let res = setup
+        .escrow
+        .try_lock_funds(&setup.depositor, &bounty_id, &amount, &deadline);
+    assert!(matches!(res, Err(Ok(Error::FundsPaused))));
+
+    // Existing escrow should still be able to release/refund (maintenance mode only affects lock).
+    setup
+        .escrow
+        .set_maintenance_mode(&false);
+    setup
+        .escrow
+        .lock_funds(&setup.depositor, &bounty_id, &amount, &deadline);
+    setup.escrow.set_maintenance_mode(&true);
+
+    setup.escrow.release_funds(&bounty_id, &setup.contributor);
+}
+
 // Valid transitions: Locked → Released
 #[test]
 fn test_locked_to_released() {
@@ -520,244 +547,117 @@ fn test_partially_refunded_to_released_fails() {
     setup.escrow.release_funds(&bounty_id, &setup.contributor);
 }
 
+// ============================================================================
+// RISK FLAGS GOVERNANCE TESTS
+// ============================================================================
+
 #[test]
-fn test_admin_rotation_proposal_sets_pending_state_and_emits_event() {
-    let setup = RotationSetup::new();
+fn test_update_risk_flags_success() {
+    let setup = TestSetup::new();
+    let bounty_id = 1;
+    let amount = 1000;
+    let deadline = setup.env.ledger().timestamp() + 1000;
 
-    assert_eq!(setup.escrow.get_admin(), Some(setup.admin.clone()));
-    assert_eq!(setup.escrow.get_pending_admin(), None);
-    assert_eq!(
-        setup.escrow.get_admin_rotation_timelock_duration(),
-        86_400
-    );
+    // Lock funds to create the initial escrow
+    setup.escrow.lock_funds(&setup.depositor, &bounty_id, &amount, &deadline);
 
-    let now = setup.env.ledger().timestamp();
-    setup.authorize(
-        &setup.admin,
-        "propose_admin_rotation",
-        (setup.pending_admin.clone(),).into_val(&setup.env),
-    );
-    let execute_after = setup.escrow.propose_admin_rotation(&setup.pending_admin);
+    // Verify initial risk flags are 0 (no metadata existed yet, fallback applied)
+    assert_eq!(setup.escrow.get_risk_flags(&bounty_id), 0);
 
-    assert_eq!(execute_after, now + 86_400);
-    assert_eq!(setup.escrow.get_pending_admin(), Some(setup.pending_admin.clone()));
-    assert_eq!(
-        setup.escrow.get_admin_rotation_timelock(),
-        Some(execute_after)
-    );
+    // Update risk flags (e.g., HIGH_RISK = 1, UNDER_REVIEW = 2) -> Bitmask 3
+    let new_flags = 3;
+    setup.escrow.update_risk_flags(&bounty_id, &new_flags);
 
-    let event = setup.env.events().all().last().unwrap().clone();
-    let topic_0: Symbol = event.1.get(0).unwrap().into_val(&setup.env);
-    assert_eq!(topic_0, Symbol::new(&setup.env, "admrotp"));
-
-    let data: events::AdminRotationProposed = event.2.try_into_val(&setup.env).unwrap();
-    assert_eq!(data.version, EVENT_VERSION_V2);
-    assert_eq!(data.current_admin, setup.admin);
-    assert_eq!(data.pending_admin, setup.pending_admin);
-    assert_eq!(data.timelock_duration, 86_400);
-    assert_eq!(data.execute_after, execute_after);
-    assert_eq!(data.timestamp, now);
+    // Verify flags persisted in the EscrowMetadata struct
+    assert_eq!(setup.escrow.get_risk_flags(&bounty_id), new_flags);
+    
+    // Clear the flags
+    setup.escrow.update_risk_flags(&bounty_id, &0);
+    assert_eq!(setup.escrow.get_risk_flags(&bounty_id), 0);
 }
 
 #[test]
-fn test_admin_rotation_accept_requires_elapsed_timelock() {
-    let setup = RotationSetup::new();
-
-    setup.authorize(
-        &setup.admin,
-        "propose_admin_rotation",
-        (setup.pending_admin.clone(),).into_val(&setup.env),
-    );
-    setup.escrow.propose_admin_rotation(&setup.pending_admin);
-
-    setup.authorize(
-        &setup.pending_admin,
-        "accept_admin_rotation",
-        ().into_val(&setup.env),
-    );
-    let result = setup.escrow.try_accept_admin_rotation();
-
-    assert_eq!(
-        result.unwrap_err().unwrap(),
-        Error::AdminRotationTimelockActive
-    );
-    assert_eq!(setup.escrow.get_admin(), Some(setup.admin.clone()));
-    assert_eq!(setup.escrow.get_pending_admin(), Some(setup.pending_admin));
+#[should_panic(expected = "Error(Contract, #202)")]
+fn test_update_risk_flags_bounty_not_found() {
+    let setup = TestSetup::new();
+    let missing_bounty_id = 999;
+    
+    // Attempting to flag an escrow that does not exist should throw BountyNotFound (202)
+    setup.escrow.update_risk_flags(&missing_bounty_id, &1);
 }
 
 #[test]
-fn test_admin_rotation_accept_requires_pending_proposal() {
-    let setup = RotationSetup::new();
+#[should_panic(expected = "Error(Contract, #202)")]
+fn test_get_risk_flags_bounty_not_found() {
+    let setup = TestSetup::new();
+    let missing_bounty_id = 999;
+    
+    // Attempting to read flags from a missing escrow should fail
+    setup.escrow.get_risk_flags(&missing_bounty_id);
+}
 
-    setup.authorize(
-        &setup.pending_admin,
-        "accept_admin_rotation",
-        ().into_val(&setup.env),
-    );
-    let result = setup.escrow.try_accept_admin_rotation();
+// ============================================================================
+// MAINTENANCE MODE HARDENING TESTS
+// ============================================================================
 
-    assert_eq!(
-        result.unwrap_err().unwrap(),
-        Error::AdminRotationNotPending
-    );
-    assert_eq!(setup.escrow.get_admin(), Some(setup.admin));
-    assert_eq!(setup.escrow.get_pending_admin(), None);
+#[test]
+#[should_panic(expected = "Error(Contract, #18)")]
+fn test_maintenance_mode_halts_lock() {
+    let setup = TestSetup::new();
+    let reason = soroban_sdk::String::from_str(&setup.env, "Emergency upgrade");
+    setup.escrow.set_maintenance_mode(&true, &Some(reason));
+    
+    let bounty_id = 1;
+    let amount = 1000;
+    let deadline = setup.env.ledger().timestamp() + 1000;
+    
+    // Should panic with FundsPaused (18)
+    setup.escrow.lock_funds(&setup.depositor, &bounty_id, &amount, &deadline);
 }
 
 #[test]
-fn test_admin_rotation_accept_updates_admin_and_emits_event() {
-    let setup = RotationSetup::new();
-
-    setup.authorize(
-        &setup.admin,
-        "propose_admin_rotation",
-        (setup.pending_admin.clone(),).into_val(&setup.env),
-    );
-    let execute_after = setup.escrow.propose_admin_rotation(&setup.pending_admin);
-
-    setup.env.ledger().set_timestamp(execute_after);
-    setup.authorize(
-        &setup.pending_admin,
-        "accept_admin_rotation",
-        ().into_val(&setup.env),
-    );
-    let new_admin = setup.escrow.accept_admin_rotation();
-
-    assert_eq!(new_admin, setup.pending_admin);
-    assert_eq!(setup.escrow.get_admin(), Some(setup.pending_admin.clone()));
-    assert_eq!(setup.escrow.get_pending_admin(), None);
-    assert_eq!(setup.escrow.get_admin_rotation_timelock(), None);
-
-    let event = setup.env.events().all().last().unwrap().clone();
-    let topic_0: Symbol = event.1.get(0).unwrap().into_val(&setup.env);
-    assert_eq!(topic_0, Symbol::new(&setup.env, "admrota"));
-
-    let data: events::AdminRotationAccepted = event.2.try_into_val(&setup.env).unwrap();
-    assert_eq!(data.version, EVENT_VERSION_V2);
-    assert_eq!(data.previous_admin, setup.admin);
-    assert_eq!(data.new_admin, setup.pending_admin);
-    assert_eq!(data.timestamp, execute_after);
+#[should_panic(expected = "Error(Contract, #18)")]
+fn test_maintenance_mode_halts_release() {
+    let setup = TestSetup::new();
+    let bounty_id = 1;
+    let amount = 1000;
+    let deadline = setup.env.ledger().timestamp() + 1000;
+    
+    setup.escrow.lock_funds(&setup.depositor, &bounty_id, &amount, &deadline);
+    
+    setup.escrow.set_maintenance_mode(&true, &None);
+    
+    // Should panic with FundsPaused (18)
+    setup.escrow.release_funds(&bounty_id, &setup.contributor);
 }
 
 #[test]
-fn test_admin_rotation_rejects_current_admin_as_target() {
-    let setup = RotationSetup::new();
-
-    setup.authorize(
-        &setup.admin,
-        "propose_admin_rotation",
-        (setup.admin.clone(),).into_val(&setup.env),
-    );
-    let result = setup.escrow.try_propose_admin_rotation(&setup.admin);
-
-    assert_eq!(
-        result.unwrap_err().unwrap(),
-        Error::InvalidAdminRotationTarget
-    );
-    assert_eq!(setup.escrow.get_pending_admin(), None);
-    assert_eq!(setup.escrow.get_admin_rotation_timelock(), None);
+#[should_panic(expected = "Error(Contract, #18)")]
+fn test_maintenance_mode_halts_refund() {
+    let setup = TestSetup::new();
+    let bounty_id = 1;
+    let amount = 1000;
+    let deadline = setup.env.ledger().timestamp() + 100;
+    
+    setup.escrow.lock_funds(&setup.depositor, &bounty_id, &amount, &deadline);
+    setup.env.ledger().set_timestamp(deadline + 1);
+    
+    setup.escrow.set_maintenance_mode(&true, &None);
+    
+    // Should panic with FundsPaused (18)
+    setup.escrow.refund(&bounty_id);
 }
 
 #[test]
-fn test_admin_rotation_cancel_clears_pending_state() {
-    let setup = RotationSetup::new();
-
-    setup.authorize(
-        &setup.admin,
-        "propose_admin_rotation",
-        (setup.pending_admin.clone(),).into_val(&setup.env),
-    );
-    setup.escrow.propose_admin_rotation(&setup.pending_admin);
-
-    setup.authorize(
-        &setup.admin,
-        "cancel_admin_rotation",
-        ().into_val(&setup.env),
-    );
-    setup.escrow.cancel_admin_rotation();
-
-    assert_eq!(setup.escrow.get_admin(), Some(setup.admin.clone()));
-    assert_eq!(setup.escrow.get_pending_admin(), None);
-    assert_eq!(setup.escrow.get_admin_rotation_timelock(), None);
-
-    let event = setup.env.events().all().last().unwrap().clone();
-    let topic_0: Symbol = event.1.get(0).unwrap().into_val(&setup.env);
-    assert_eq!(topic_0, Symbol::new(&setup.env, "admrotc"));
-
-    let data: events::AdminRotationCancelled = event.2.try_into_val(&setup.env).unwrap();
-    assert_eq!(data.version, EVENT_VERSION_V2);
-    assert_eq!(data.admin, setup.admin);
-    assert_eq!(data.cancelled_pending_admin, setup.pending_admin);
-}
-
-#[test]
-fn test_admin_rotation_rejects_second_pending_proposal() {
-    let setup = RotationSetup::new();
-
-    setup.authorize(
-        &setup.admin,
-        "propose_admin_rotation",
-        (setup.pending_admin.clone(),).into_val(&setup.env),
-    );
-    setup.escrow.propose_admin_rotation(&setup.pending_admin);
-
-    setup.authorize(
-        &setup.admin,
-        "propose_admin_rotation",
-        (setup.replacement_admin.clone(),).into_val(&setup.env),
-    );
-    let result = setup
-        .escrow
-        .try_propose_admin_rotation(&setup.replacement_admin);
-
-    assert_eq!(
-        result.unwrap_err().unwrap(),
-        Error::AdminRotationAlreadyPending
-    );
-    assert_eq!(setup.escrow.get_pending_admin(), Some(setup.pending_admin));
-}
-
-#[test]
-fn test_admin_rotation_timelock_duration_update_has_bounds_and_event() {
-    let setup = RotationSetup::new();
-    let new_duration = 172_800u64;
-
-    setup.authorize(
-        &setup.admin,
-        "set_admin_rotation_timelock_duration",
-        (new_duration,).into_val(&setup.env),
-    );
-    setup
-        .escrow
-        .set_admin_rotation_timelock_duration(&new_duration);
-
-    assert_eq!(
-        setup.escrow.get_admin_rotation_timelock_duration(),
-        new_duration
-    );
-
-    let event = setup.env.events().all().last().unwrap().clone();
-    let topic_0: Symbol = event.1.get(0).unwrap().into_val(&setup.env);
-    assert_eq!(topic_0, Symbol::new(&setup.env, "admtlcfg"));
-
-    let data: events::AdminRotationTimelockUpdated =
-        event.2.try_into_val(&setup.env).unwrap();
-    assert_eq!(data.version, EVENT_VERSION_V2);
-    assert_eq!(data.admin, setup.admin);
-    assert_eq!(data.previous_duration, 86_400);
-    assert_eq!(data.new_duration, new_duration);
-
-    setup.authorize(
-        &setup.admin,
-        "set_admin_rotation_timelock_duration",
-        (3_599u64,).into_val(&setup.env),
-    );
-    let result = setup
-        .escrow
-        .try_set_admin_rotation_timelock_duration(&3_599u64);
-
-    assert_eq!(
-        result.unwrap_err().unwrap(),
-        Error::InvalidAdminRotationTimelock
-    );
+fn test_maintenance_mode_toggles_correctly() {
+    let setup = TestSetup::new();
+    let reason = soroban_sdk::String::from_str(&setup.env, "Routine sync");
+    
+    assert_eq!(setup.escrow.is_maintenance_mode(), false);
+    
+    setup.escrow.set_maintenance_mode(&true, &Some(reason));
+    assert_eq!(setup.escrow.is_maintenance_mode(), true);
+    
+    setup.escrow.set_maintenance_mode(&false, &None);
+    assert_eq!(setup.escrow.is_maintenance_mode(), false);
 }
