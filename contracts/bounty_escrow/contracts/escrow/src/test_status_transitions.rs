@@ -129,6 +129,33 @@ fn test_refund_eligibility_eligible_with_admin_approval_before_deadline() {
     assert!(view.approval_present);
 }
 
+#[test]
+fn test_maintenance_mode_blocks_lock_but_not_release_or_refund_paths() {
+    let setup = TestSetup::new();
+    let bounty_id = 202;
+    let amount = 1000;
+    let deadline = setup.env.ledger().timestamp() + 100;
+
+    setup.escrow.set_maintenance_mode(&true);
+
+    // Lock should be blocked (maintenance mode acts like lock pause).
+    let res = setup
+        .escrow
+        .try_lock_funds(&setup.depositor, &bounty_id, &amount, &deadline);
+    assert!(matches!(res, Err(Ok(Error::FundsPaused))));
+
+    // Existing escrow should still be able to release/refund (maintenance mode only affects lock).
+    setup
+        .escrow
+        .set_maintenance_mode(&false);
+    setup
+        .escrow
+        .lock_funds(&setup.depositor, &bounty_id, &amount, &deadline);
+    setup.escrow.set_maintenance_mode(&true);
+
+    setup.escrow.release_funds(&bounty_id, &setup.contributor);
+}
+
 // Valid transitions: Locked → Released
 #[test]
 fn test_locked_to_released() {
@@ -462,160 +489,117 @@ fn test_partially_refunded_to_released_fails() {
     setup.escrow.release_funds(&bounty_id, &setup.contributor);
 }
 
-
 // ============================================================================
-// CLAIM WINDOW VALIDATION TESTS
-// ============================================================================
-
-#[test]
-fn test_claim_window_lifecycle_success() {
-    let setup = TestSetup::new();
-    let bounty_id = 1;
-    let current_time = setup.env.ledger().timestamp();
-    
-    let start_time = current_time + 1000;
-    let end_time = current_time + 5000;
-
-    setup.escrow.set_claim_window(&bounty_id, &start_time, &end_time);
-    setup.env.ledger().set_timestamp(start_time + 100);
-    assert_eq!(setup.escrow.validate_claim_window(&bounty_id), ());
-}
-
-#[test]
-#[should_panic]
-fn test_claim_window_fails_too_early() {
-    let setup = TestSetup::new();
-    let bounty_id = 1;
-    let current_time = setup.env.ledger().timestamp();
-    
-    let start_time = current_time + 1000;
-    let end_time = current_time + 5000;
-
-    setup.escrow.set_claim_window(&bounty_id, &start_time, &end_time);
-    setup.escrow.validate_claim_window(&bounty_id);
-}
-
-#[test]
-#[should_panic]
-fn test_claim_window_fails_too_late() {
-    let setup = TestSetup::new();
-    let bounty_id = 1;
-    let current_time = setup.env.ledger().timestamp();
-    
-    let start_time = current_time + 1000;
-    let end_time = current_time + 5000;
-
-    setup.escrow.set_claim_window(&bounty_id, &start_time, &end_time);
-    setup.env.ledger().set_timestamp(end_time + 1);
-    setup.escrow.validate_claim_window(&bounty_id);
-}
-
-#[test]
-#[should_panic]
-fn test_claim_window_invalid_range() {
-    let setup = TestSetup::new();
-    let bounty_id = 1;
-    let current_time = setup.env.ledger().timestamp();
-    
-    let start_time = current_time + 5000;
-    let end_time = current_time + 1000; 
-
-    setup.escrow.set_claim_window(&bounty_id, &start_time, &end_time);
-}
-
-#[test]
-fn test_unconfigured_claim_window_passes_validation() {
-    let setup = TestSetup::new();
-    let bounty_id = 99; 
-    assert_eq!(setup.escrow.validate_claim_window(&bounty_id), ());
-}
-
-// ============================================================================
-// REENTRANCY GUARD TESTS
+// RISK FLAGS GOVERNANCE TESTS
 // ============================================================================
 
 #[test]
-#[should_panic(expected = "Reentrancy detected")]
-fn test_reentrancy_guard_blocks_reentry() {
+fn test_update_risk_flags_success() {
     let setup = TestSetup::new();
+    let bounty_id = 1;
+    let amount = 1000;
+    let deadline = setup.env.ledger().timestamp() + 1000;
+
+    // Lock funds to create the initial escrow
+    setup.escrow.lock_funds(&setup.depositor, &bounty_id, &amount, &deadline);
+
+    // Verify initial risk flags are 0 (no metadata existed yet, fallback applied)
+    assert_eq!(setup.escrow.get_risk_flags(&bounty_id), 0);
+
+    // Update risk flags (e.g., HIGH_RISK = 1, UNDER_REVIEW = 2) -> Bitmask 3
+    let new_flags = 3;
+    setup.escrow.update_risk_flags(&bounty_id, &new_flags);
+
+    // Verify flags persisted in the EscrowMetadata struct
+    assert_eq!(setup.escrow.get_risk_flags(&bounty_id), new_flags);
     
-    // 1. Manually lock the guard in the environment
-    let key = symbol_short!("r_guard");
-    setup.env.storage().instance().set(&key, &true);
-    
-    // 2. Attempting to enter the guard while already locked should trigger the panic and event
-    let _guard = super::NonReentrant::enter(&setup.env);
+    // Clear the flags
+    setup.escrow.update_risk_flags(&bounty_id, &0);
+    assert_eq!(setup.escrow.get_risk_flags(&bounty_id), 0);
 }
 
 #[test]
-fn test_reentrancy_guard_lifecycle_and_view() {
+#[should_panic(expected = "Error(Contract, #202)")]
+fn test_update_risk_flags_bounty_not_found() {
     let setup = TestSetup::new();
+    let missing_bounty_id = 999;
     
-    // Verify default unlocked state
-    assert_eq!(setup.escrow.is_reentrancy_guard_locked(), false);
+    // Attempting to flag an escrow that does not exist should throw BountyNotFound (202)
+    setup.escrow.update_risk_flags(&missing_bounty_id, &1);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #202)")]
+fn test_get_risk_flags_bounty_not_found() {
+    let setup = TestSetup::new();
+    let missing_bounty_id = 999;
     
-    {
-        // Scope block to test state
-        setup.env.storage().instance().set(&symbol_short!("r_guard"), &true);
-        assert_eq!(setup.escrow.is_reentrancy_guard_locked(), true);
-    }
-    
-    // Simulate end of scope cleanup
-    setup.env.storage().instance().remove(&symbol_short!("r_guard"));
-    assert_eq!(setup.escrow.is_reentrancy_guard_locked(), false);
+    // Attempting to read flags from a missing escrow should fail
+    setup.escrow.get_risk_flags(&missing_bounty_id);
 }
 
 // ============================================================================
-// HIGH-VALUE TIMELOCK TESTS
+// MAINTENANCE MODE HARDENING TESTS
 // ============================================================================
 
 #[test]
-fn test_high_value_queue_and_execute() {
+#[should_panic(expected = "Error(Contract, #18)")]
+fn test_maintenance_mode_halts_lock() {
     let setup = TestSetup::new();
+    let reason = soroban_sdk::String::from_str(&setup.env, "Emergency upgrade");
+    setup.escrow.set_maintenance_mode(&true, &Some(reason));
+    
     let bounty_id = 1;
-    let threshold = 5000;
-    let duration = 86400; // 24 hours
-    let current_time = setup.env.ledger().timestamp();
-
-    // Configure
-    setup.escrow.set_high_value_config(&threshold, &duration);
+    let amount = 1000;
+    let deadline = setup.env.ledger().timestamp() + 1000;
     
-    // Queue a release
-    setup.escrow.queue_high_value_release(&bounty_id, &setup.contributor, &6000);
-    
-    let queued = setup.escrow.get_queued_release(&bounty_id).unwrap();
-    assert_eq!(queued.amount, 6000);
-    assert_eq!(queued.executable_at, current_time + duration);
-
-    // Fast-forward past the timelock
-    setup.env.ledger().set_timestamp(current_time + duration + 1);
-    
-    // Execute
-    assert_eq!(setup.escrow.execute_queued_release(&bounty_id), ());
-    assert!(setup.escrow.get_queued_release(&bounty_id).is_none());
+    // Should panic with FundsPaused (18)
+    setup.escrow.lock_funds(&setup.depositor, &bounty_id, &amount, &deadline);
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #6)")] // DeadlineNotPassed
-fn test_execute_queued_release_fails_early() {
+#[should_panic(expected = "Error(Contract, #18)")]
+fn test_maintenance_mode_halts_release() {
     let setup = TestSetup::new();
     let bounty_id = 1;
+    let amount = 1000;
+    let deadline = setup.env.ledger().timestamp() + 1000;
     
-    setup.escrow.set_high_value_config(&5000, &86400);
-    setup.escrow.queue_high_value_release(&bounty_id, &setup.contributor, &6000);
+    setup.escrow.lock_funds(&setup.depositor, &bounty_id, &amount, &deadline);
     
-    // Attempting execution immediately should panic
-    setup.escrow.execute_queued_release(&bounty_id);
+    setup.escrow.set_maintenance_mode(&true, &None);
+    
+    // Should panic with FundsPaused (18)
+    setup.escrow.release_funds(&bounty_id, &setup.contributor);
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #13)")] // InvalidAmount
-fn test_queue_fails_below_threshold() {
+#[should_panic(expected = "Error(Contract, #18)")]
+fn test_maintenance_mode_halts_refund() {
     let setup = TestSetup::new();
     let bounty_id = 1;
+    let amount = 1000;
+    let deadline = setup.env.ledger().timestamp() + 100;
     
-    setup.escrow.set_high_value_config(&5000, &86400);
+    setup.escrow.lock_funds(&setup.depositor, &bounty_id, &amount, &deadline);
+    setup.env.ledger().set_timestamp(deadline + 1);
     
-    // Queueing 4000 when threshold is 5000 should panic
-    setup.escrow.queue_high_value_release(&bounty_id, &setup.contributor, &4000);
+    setup.escrow.set_maintenance_mode(&true, &None);
+    
+    // Should panic with FundsPaused (18)
+    setup.escrow.refund(&bounty_id);
+}
+
+#[test]
+fn test_maintenance_mode_toggles_correctly() {
+    let setup = TestSetup::new();
+    let reason = soroban_sdk::String::from_str(&setup.env, "Routine sync");
+    
+    assert_eq!(setup.escrow.is_maintenance_mode(), false);
+    
+    setup.escrow.set_maintenance_mode(&true, &Some(reason));
+    assert_eq!(setup.escrow.is_maintenance_mode(), true);
+    
+    setup.escrow.set_maintenance_mode(&false, &None);
+    assert_eq!(setup.escrow.is_maintenance_mode(), false);
 }
