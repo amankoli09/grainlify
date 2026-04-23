@@ -285,8 +285,8 @@
           }
         ],
         "returns": {
-          "type": "Vec<Escrow>",
-          "description": "Array of created escrow records"
+          "type": "u32",
+          "description": "Number of bounties successfully locked"
         },
         "authorization": "signer",
         "pausable": true,
@@ -303,8 +303,8 @@
           }
         ],
         "returns": {
-          "type": "Vec<()>",
-          "description": "Array of results"
+          "type": "u32",
+          "description": "Number of bounties successfully released"
         },
         "authorization": "admin",
         "pausable": true,
@@ -422,6 +422,18 @@
         "returns": {
           "type": "FeeConfig",
           "description": "Fee configuration"
+        },
+        "authorization": "any",
+        "pausable": false,
+        "gas_estimate": "low"
+      },
+      {
+        "name": "get_batch_size_caps",
+        "description": "Get the effective batch size caps for batch lock and batch release",
+        "parameters": [],
+        "returns": {
+          "type": "BatchSizeCaps",
+          "description": "Current effective batch size cap configuration"
         },
         "authorization": "any",
         "pausable": false,
@@ -890,9 +902,25 @@
         "name": "MAX_BATCH_SIZE",
         "type": "u32",
         "default_value": "20",
-        "description": "Maximum number of items in batch operations",
-        "constraints": "1 <= value <= 100",
+        "description": "Compile-time hard upper bound for admin-configurable batch caps",
+        "constraints": "value = 20",
         "admin_only": false
+      },
+      {
+        "name": "batch_lock_cap",
+        "type": "u32",
+        "default_value": "20",
+        "description": "Effective runtime cap for batch_lock_funds",
+        "constraints": "1 <= value <= MAX_BATCH_SIZE",
+        "admin_only": true
+      },
+      {
+        "name": "batch_release_cap",
+        "type": "u32",
+        "default_value": "20",
+        "description": "Effective runtime cap for batch_release_funds",
+        "constraints": "1 <= value <= MAX_BATCH_SIZE",
+        "admin_only": true
       },
       {
         "name": "lock_fee_rate",

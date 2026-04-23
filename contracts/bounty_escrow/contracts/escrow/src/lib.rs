@@ -948,6 +948,15 @@ pub struct FeeConfig {
     pub distribution_enabled: bool,
 }
 
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BatchSizeCaps {
+    /// Maximum allowed item count for `batch_lock_funds`.
+    pub lock_cap: u32,
+    /// Maximum allowed item count for `batch_release_funds`.
+    pub release_cap: u32,
+}
+
 /// Per-token fee configuration.
 ///
 /// Allows different fee rates and recipients for each accepted token type.
@@ -1379,6 +1388,35 @@ impl BountyEscrowContract {
                 treasury_destinations: Vec::new(env),
                 distribution_enabled: false,
             })
+    }
+
+    /// Returns the effective batch size caps, defaulting to the compile-time hard limit.
+    fn get_batch_size_caps_internal(env: &Env) -> BatchSizeCaps {
+        env.storage()
+            .instance()
+            .get(&DataKey::BatchSizeCaps)
+            .unwrap_or(BatchSizeCaps {
+                lock_cap: MAX_BATCH_SIZE,
+                release_cap: MAX_BATCH_SIZE,
+            })
+    }
+
+    fn validate_batch_size_caps(caps: &BatchSizeCaps) -> Result<(), Error> {
+        if caps.lock_cap == 0
+            || caps.release_cap == 0
+            || caps.lock_cap > MAX_BATCH_SIZE
+            || caps.release_cap > MAX_BATCH_SIZE
+        {
+            return Err(Error::InvalidBatchSizeCap);
+        }
+        Ok(())
+    }
+
+    fn validate_batch_len(batch_size: u32, cap: u32) -> Result<(), Error> {
+        if batch_size == 0 || batch_size > cap {
+            return Err(Error::InvalidBatchSize);
+        }
+        Ok(())
     }
 
     /// Validates treasury destinations before enabling multi-region routing.

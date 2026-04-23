@@ -640,6 +640,23 @@ pub fn emit_batch_funds_released(env: &Env, event: BatchFundsReleased) {
     env.events().publish(topics, event.clone());
 }
 
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BatchSizeCapsUpdated {
+    pub version: u32,
+    pub previous_lock_cap: u32,
+    pub new_lock_cap: u32,
+    pub previous_release_cap: u32,
+    pub new_release_cap: u32,
+    pub admin: Address,
+    pub timestamp: u64,
+}
+
+pub fn emit_batch_size_caps_updated(env: &Env, event: BatchSizeCapsUpdated) {
+    let topics = (symbol_short!("bcapcfg"),);
+    env.events().publish(topics, event);
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // APPROVAL & CLAIM EVENTS
 // ═══════════════════════════════════════════════════════════════════════════════
