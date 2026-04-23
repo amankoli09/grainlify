@@ -1,7 +1,7 @@
 {
   "$schema": "./contract-manifest-schema.json",
   "contract_name": "BountyEscrowContract",
-  "contract_purpose": "Manages bounty escrow with multi-token support, capability-based authorization, fee configuration, and comprehensive security features including reentrancy protection and rate limiting",
+  "contract_purpose": "Manages bounty escrow with multi-token support, capability-based authorization, two-step admin rotation with timelock, refund-eligibility views, fee configuration, and comprehensive security features including reentrancy protection and rate limiting",
   "version": {
     "current": "2.1.1",
     "schema": "1.0.0",
@@ -34,6 +34,14 @@
           "Added explicit refund eligibility view with deterministic semantics",
           "Added refund approval audit events for approval set/consumption lifecycle",
           "Added upgrade-safe storage marker for refund eligibility schema versioning"
+        ]
+      },
+      {
+        "version": "2.2.0",
+        "release_date": "2026-04-22",
+        "changes": [
+          "Hardened maintenance mode with explicit initialization, idempotent toggling, and audit-friendly v2 events",
+          "Added upgrade-safe storage keys for maintenance mode metadata and schema versioning"
         ]
       }
     ]
@@ -277,8 +285,8 @@
           }
         ],
         "returns": {
-          "type": "Vec<Escrow>",
-          "description": "Array of created escrow records"
+          "type": "u32",
+          "description": "Number of bounties successfully locked"
         },
         "authorization": "signer",
         "pausable": true,
@@ -295,15 +303,82 @@
           }
         ],
         "returns": {
-          "type": "Vec<()>",
-          "description": "Array of results"
+          "type": "u32",
+          "description": "Number of bounties successfully released"
         },
         "authorization": "admin",
         "pausable": true,
         "gas_estimate": "high"
+      },
+      {
+        "name": "accept_admin",
+        "description": "Accept a pending admin role after timelock expires",
+        "parameters": [],
+        "returns": { "type": "()", "description": "Empty on success" },
+        "authorization": "signer",
+        "pausable": false,
+        "gas_estimate": "low"
       }
     ],
     "view": [
+      {
+        "name": "get_filter_mode",
+        "description": "Get current participant filter mode",
+        "parameters": [],
+        "returns": {
+          "type": "ParticipantFilterMode",
+          "description": "Current participant filter mode"
+        },
+        "authorization": "any",
+        "pausable": false,
+        "gas_estimate": "low"
+      },
+      {
+        "name": "query_whitelist",
+        "description": "Get paginated allowlist participants",
+        "parameters": [
+          {
+            "name": "offset",
+            "type": "u32",
+            "description": "Zero-based start index"
+          },
+          {
+            "name": "limit",
+            "type": "u32",
+            "description": "Maximum number of results"
+          }
+        ],
+        "returns": {
+          "type": "Vec<Address>",
+          "description": "Allowlisted participant addresses"
+        },
+        "authorization": "any",
+        "pausable": false,
+        "gas_estimate": "low"
+      },
+      {
+        "name": "query_blocklist",
+        "description": "Get paginated blocklist participants",
+        "parameters": [
+          {
+            "name": "offset",
+            "type": "u32",
+            "description": "Zero-based start index"
+          },
+          {
+            "name": "limit",
+            "type": "u32",
+            "description": "Maximum number of results"
+          }
+        ],
+        "returns": {
+          "type": "Vec<Address>",
+          "description": "Blocklisted participant addresses"
+        },
+        "authorization": "any",
+        "pausable": false,
+        "gas_estimate": "low"
+      },
       {
         "name": "get_escrow",
         "description": "Get escrow details by bounty ID",
@@ -347,6 +422,18 @@
         "returns": {
           "type": "FeeConfig",
           "description": "Fee configuration"
+        },
+        "authorization": "any",
+        "pausable": false,
+        "gas_estimate": "low"
+      },
+      {
+        "name": "get_batch_size_caps",
+        "description": "Get the effective batch size caps for batch lock and batch release",
+        "parameters": [],
+        "returns": {
+          "type": "BatchSizeCaps",
+          "description": "Current effective batch size cap configuration"
         },
         "authorization": "any",
         "pausable": false,
@@ -718,6 +805,65 @@
         "authorization": "admin",
         "pausable": false,
         "gas_estimate": "high"
+      },
+      {
+        "name": "update_risk_flags",
+        "description": "Updates the risk flags for a specific bounty",
+        "parameters": [
+          {
+            "name": "bounty_id",
+            "type": "u64",
+            "description": "Bounty identifier"
+          },
+          {
+            "name": "new_flags",
+            "type": "u32",
+            "description": "New bitmask of risk flags"
+          }
+        ],
+        "returns": {
+          "type": "()",
+          "description": "Empty on success"
+        },
+        "authorization": "admin",
+        "pausable": false,
+        "gas_estimate": "low"
+      },
+      {
+        "name": "set_maintenance_mode",
+        "description": "Toggle global maintenance mode",
+        "parameters": [
+          {
+            "name": "enabled",
+            "type": "bool",
+            "description": "Enable or disable maintenance mode"
+          },
+          {
+            "name": "reason",
+            "type": "Option<String>",
+            "description": "Reason for maintenance mode toggle",
+            "optional": true
+          }
+        ],
+        "returns": {
+          "type": "()",
+          "description": "Empty on success"
+        },
+        "authorization": "admin",
+        "pausable": false,
+        "gas_estimate": "low"
+      },
+      {
+        "name": "set_high_value_config",
+        "description": "Configure the threshold and delay for high-value releases",
+        "parameters": [
+          { "name": "threshold", "type": "i128", "description": "Amount triggering the timelock" },
+          { "name": "duration", "type": "u64", "description": "Timelock duration in seconds" }
+        ],
+        "returns": { "type": "()", "description": "Empty on success" },
+        "authorization": "admin",
+        "pausable": false,
+        "gas_estimate": "low"
       }
     ]
   },
@@ -735,9 +881,25 @@
         "name": "MAX_BATCH_SIZE",
         "type": "u32",
         "default_value": "20",
-        "description": "Maximum number of items in batch operations",
-        "constraints": "1 <= value <= 100",
+        "description": "Compile-time hard upper bound for admin-configurable batch caps",
+        "constraints": "value = 20",
         "admin_only": false
+      },
+      {
+        "name": "batch_lock_cap",
+        "type": "u32",
+        "default_value": "20",
+        "description": "Effective runtime cap for batch_lock_funds",
+        "constraints": "1 <= value <= MAX_BATCH_SIZE",
+        "admin_only": true
+      },
+      {
+        "name": "batch_release_cap",
+        "type": "u32",
+        "default_value": "20",
+        "description": "Effective runtime cap for batch_release_funds",
+        "constraints": "1 <= value <= MAX_BATCH_SIZE",
+        "admin_only": true
       },
       {
         "name": "lock_fee_rate",
@@ -768,6 +930,14 @@
         "default_value": "86400",
         "description": "Seconds beneficiary has to claim after authorization",
         "constraints": "value > 0",
+        "admin_only": true
+      },
+      {
+        "name": "admin_rotation_timelock_duration",
+        "type": "u64",
+        "default_value": "86400",
+        "description": "Delay in seconds before a pending admin can accept a rotation",
+        "constraints": "3600 <= value <= 2592000",
         "admin_only": true
       }
     ],
@@ -827,10 +997,46 @@
         "data_structure": "u32"
       },
       {
+        "name": "MaintenanceMode",
+        "type": "instance",
+        "description": "Maintenance mode flag (explicitly initialized)",
+        "data_structure": "bool"
+      },
+      {
+        "name": "MaintenanceModeUpdatedAt",
+        "type": "instance",
+        "description": "Timestamp when maintenance mode last changed",
+        "data_structure": "u64"
+      },
+      {
+        "name": "MaintenanceModeUpdatedBy",
+        "type": "instance",
+        "description": "Admin address that last changed maintenance mode",
+        "data_structure": "Address"
+      },
+      {
+        "name": "MaintenanceModeSchemaVersion",
+        "type": "instance",
+        "description": "Version marker for maintenance mode semantics",
+        "data_structure": "u32"
+      },
+      {
         "name": "ReentrancyGuard",
         "type": "temporary",
         "description": "Reentrancy protection flag",
         "data_structure": "bool"
+      },
+      {
+        "name": "WhitelistIndex",
+        "type": "instance",
+        "description": "Paginated index of allowlisted addresses",
+        "data_structure": "Vec<Address>"
+      },
+      {
+        "name": "BlocklistIndex",
+        "type": "instance",
+        "description": "Paginated index of blocklisted addresses",
+        "data_structure": "Vec<Address>"
       }
     ]
   },
@@ -845,7 +1051,8 @@
       "Input validation for all parameters",
       "Overflow protection in arithmetic operations",
       "Event emission for audit trail",
-      "Deterministic refund eligibility view semantics"
+      "Deterministic refund eligibility view semantics",
+      "Deterministic maintenance mode semantics with audit events"
     ],
     "access_control": [
       {
@@ -1065,6 +1272,99 @@
         "trigger": "Successful refund_funds call"
       },
       {
+        "name": "AdminRotationProposed",
+        "description": "Current admin proposed a pending admin rotation",
+        "data": [
+          {
+            "name": "current_admin",
+            "type": "Address",
+            "description": "Current active admin"
+          },
+          {
+            "name": "pending_admin",
+            "type": "Address",
+            "description": "Pending admin that may accept after the timelock"
+          },
+          {
+            "name": "timelock_duration",
+            "type": "u64",
+            "description": "Configured delay in seconds"
+          },
+          {
+            "name": "execute_after",
+            "type": "u64",
+            "description": "Timestamp when acceptance becomes valid"
+          }
+        ],
+        "trigger": "Successful propose_admin_rotation call"
+      },
+      {
+        "name": "AdminRotationAccepted",
+        "description": "Pending admin accepted and became the new active admin",
+        "data": [
+          {
+            "name": "previous_admin",
+            "type": "Address",
+            "description": "Admin before the rotation completed"
+          },
+          {
+            "name": "new_admin",
+            "type": "Address",
+            "description": "New active admin"
+          },
+          {
+            "name": "timestamp",
+            "type": "u64",
+            "description": "Acceptance timestamp"
+          }
+        ],
+        "trigger": "Successful accept_admin_rotation call"
+      },
+      {
+        "name": "AdminRotationCancelled",
+        "description": "Current admin cancelled a pending admin rotation",
+        "data": [
+          {
+            "name": "admin",
+            "type": "Address",
+            "description": "Admin that cancelled the pending rotation"
+          },
+          {
+            "name": "cancelled_pending_admin",
+            "type": "Address",
+            "description": "Pending admin that was cleared"
+          },
+          {
+            "name": "timestamp",
+            "type": "u64",
+            "description": "Cancellation timestamp"
+          }
+        ],
+        "trigger": "Successful cancel_admin_rotation call"
+      },
+      {
+        "name": "AdminRotationTimelockUpdated",
+        "description": "Admin-rotation timelock duration was updated",
+        "data": [
+          {
+            "name": "admin",
+            "type": "Address",
+            "description": "Admin that updated the timelock configuration"
+          },
+          {
+            "name": "previous_duration",
+            "type": "u64",
+            "description": "Prior timelock duration"
+          },
+          {
+            "name": "new_duration",
+            "type": "u64",
+            "description": "New timelock duration"
+          }
+        ],
+        "trigger": "Successful set_admin_rotation_timelock_duration call"
+      },
+      {
         "name": "RefundApprovalSet",
         "description": "Admin refund approval created or updated",
         "data": [
@@ -1102,6 +1402,33 @@
           }
         ],
         "trigger": "Successful refund call with admin approval record"
+      },
+      {
+        "name": "MaintenanceModeChangedV2",
+        "description": "Maintenance mode toggled with previous state (audit-friendly)",
+        "data": [
+          {
+            "name": "previous_enabled",
+            "type": "bool",
+            "description": "Previous maintenance mode state"
+          },
+          {
+            "name": "enabled",
+            "type": "bool",
+            "description": "New maintenance mode state"
+          },
+          {
+            "name": "admin",
+            "type": "Address",
+            "description": "Admin who toggled maintenance mode"
+          },
+          {
+            "name": "timestamp",
+            "type": "u64",
+            "description": "Ledger timestamp"
+          }
+        ],
+        "trigger": "Admin toggles maintenance mode (state change only)"
       }
     ]
   },
@@ -1153,6 +1480,12 @@
           "description": "Set up multisig if required",
           "command": "stellar contract invoke --id CONTRACT_ID -- update_multisig_config --threshold_amount 1000000000 --signers SIGNER1,SIGNER2,SIGNER3 --required_signatures 2",
           "notes": "Optional: configure multisig for large releases"
+        },
+        {
+          "step": 5,
+          "description": "Optionally tune the admin-rotation timelock",
+          "command": "stellar contract invoke --id CONTRACT_ID -- set_admin_rotation_timelock_duration --duration 86400",
+          "notes": "Recommended for governance hardening before transferring long-lived admin control"
         }
       ],
       "prerequisites": [

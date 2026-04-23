@@ -521,9 +521,82 @@ pub struct DisputeResolvedEvent {
     pub resolved_at: u64,
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// SPEND-LIMIT THRESHOLD AUDIT EVENTS
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Emitted when the admin sets or updates the per-program spend threshold.
+///
+/// ### Topics
+/// `(SPEND_LIMIT_SET, program_id)`
+///
+/// ### Security notes
+/// - Only the admin can call `set_program_spend_threshold`.
+/// - `previous_threshold` is `i128::MAX` when no threshold was previously set.
+/// - Emitted **after** the new value is persisted so the event reflects
+///   the settled on-chain state.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SpendLimitSetEvent {
+    pub version: u32,
+    /// Program the threshold applies to.
+    pub program_id: String,
+    /// Previous threshold value (`i128::MAX` = unlimited).
+    pub previous_threshold: i128,
+    /// New threshold value.
+    pub new_threshold: i128,
+    /// Admin that made the change.
+    pub set_by: Address,
+    /// Ledger timestamp.
+    pub timestamp: u64,
+}
+
+/// Emitted when a payout is rejected because it would exceed the spend threshold.
+///
+/// ### Topics
+/// `(SPEND_LIMIT_EXCEEDED, program_id)`
+///
+/// ### Security notes
+/// - Emitted **before** any token transfer so no funds move on rejection.
+/// - `requested_amount` and `threshold` are published so auditors can
+///   verify the rejection was correct without re-reading storage.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SpendLimitExceededEvent {
+    pub version: u32,
+    /// Program the threshold applies to.
+    pub program_id: String,
+    /// Amount that was requested (and rejected).
+    pub requested_amount: i128,
+    /// Configured threshold that was exceeded.
+    pub threshold: i128,
+    /// Ledger timestamp.
+    pub timestamp: u64,
+}
+
+/// Emitted once during contract initialization to record the spend-limit
+/// storage schema version for upgrade-safety tracking.
+///
+/// ### Topics
+/// `(SPEND_LIMIT_SCHEMA,)`
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SpendLimitSchemaVersionSet {
+    pub version: u32,
+    /// Schema version written to instance storage.
+    pub schema_version: u32,
+    /// Ledger timestamp.
+    pub timestamp: u64,
+}
+
 // Event symbols for dispute lifecycle
 const DISPUTE_OPENED: Symbol = symbol_short!("DspOpen");
 const DISPUTE_RESOLVED: Symbol = symbol_short!("DspRslv");
+
+// Event symbols for spend-limit threshold lifecycle
+const SPEND_LIMIT_SET: Symbol = symbol_short!("SpLimSet");
+const SPEND_LIMIT_EXCEEDED: Symbol = symbol_short!("SpLimExc");
+const SPEND_LIMIT_SCHEMA: Symbol = symbol_short!("SpLimSch");
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -545,6 +618,9 @@ pub enum DataKey {
     DependencyStatus(String),        // program_id -> DependencyStatus
     Dispute,                         // DisputeRecord (single active dispute per contract)
     HistoryPaginationConfig,         // HistoryPaginationConfig
+    /// Upgrade-safe schema version marker for spend-limit threshold storage.
+    /// Written on init; increment when `MultisigConfig` layout changes.
+    SpendLimitSchemaVersion,
 }
 
 #[contracttype]
@@ -764,6 +840,13 @@ pub enum BatchError {
 
 pub const MAX_BATCH_SIZE: u32 = 100;
 pub const DEFAULT_MAX_HISTORY_PAGE_LIMIT: u32 = 200;
+
+/// Current spend-limit threshold storage schema version.
+///
+/// Increment whenever `MultisigConfig` layout changes in a breaking way.
+/// Written to instance storage during `init` so upgrade safety checks can
+/// detect schema mismatches on legacy deployments.
+pub const SPEND_LIMIT_SCHEMA_VERSION_V1: u32 = 1;
 
 fn default_history_pagination_config() -> HistoryPaginationConfig {
     HistoryPaginationConfig {
@@ -1196,6 +1279,26 @@ impl ProgramEscrowContract {
             );
         }
         Self::ensure_history_pagination_config(&env);
+
+        // Write upgrade-safe spend-limit schema version marker.
+        if !env
+            .storage()
+            .instance()
+            .has(&DataKey::SpendLimitSchemaVersion)
+        {
+            env.storage().instance().set(
+                &DataKey::SpendLimitSchemaVersion,
+                &SPEND_LIMIT_SCHEMA_VERSION_V1,
+            );
+            env.events().publish(
+                (SPEND_LIMIT_SCHEMA,),
+                SpendLimitSchemaVersionSet {
+                    version: EVENT_VERSION_V2,
+                    schema_version: SPEND_LIMIT_SCHEMA_VERSION_V1,
+                    timestamp: env.ledger().timestamp(),
+                },
+            );
+        }
 
         env.storage()
             .instance()
@@ -2275,12 +2378,20 @@ impl ProgramEscrowContract {
 
     /// Set the per-program spend threshold.
     ///
-    /// Security and deterministic behavior:
+    /// # Invariant
+    /// After this call, any single payout or batch total exceeding
+    /// `threshold_amount` will be rejected with `SpendLimitExceeded` and
+    /// a `SpendLimitExceededEvent` audit event will be emitted.
+    ///
+    /// # Security and deterministic behavior
     /// - Admin only.
-    /// - `threshold_amount` must be strictly positive.
-    /// - Payout validation checks this threshold before balance checks.
+    /// - `threshold_amount` must be strictly positive; zero or negative
+    ///   values are rejected with `InvalidAmount`.
+    /// - Payout validation checks this threshold **before** balance checks
+    ///   so clients observe stable, deterministic failures.
+    /// - Emits `SpendLimitSetEvent` after the new value is persisted.
     pub fn set_program_spend_threshold(env: Env, program_id: String, threshold_amount: i128) {
-        let _ = Self::require_admin(&env);
+        let admin = Self::require_admin(&env);
         if threshold_amount <= 0 {
             panic!("Invalid spend threshold");
         }
@@ -2294,13 +2405,28 @@ impl ProgramEscrowContract {
                 signers: vec![&env],
                 required_signatures: 0,
             });
+
+        let previous_threshold = cfg.threshold_amount;
         cfg.threshold_amount = threshold_amount;
         env.storage()
             .persistent()
-            .set(&DataKey::MultisigConfig(program_id), &cfg);
+            .set(&DataKey::MultisigConfig(program_id.clone()), &cfg);
+
+        // Emit audit event after storage write (CEI ordering).
+        env.events().publish(
+            (SPEND_LIMIT_SET, program_id.clone()),
+            SpendLimitSetEvent {
+                version: EVENT_VERSION_V2,
+                program_id,
+                previous_threshold,
+                new_threshold: threshold_amount,
+                set_by: admin,
+                timestamp: env.ledger().timestamp(),
+            },
+        );
     }
 
-    /// Read per-program spend threshold. Returns `i128::MAX` when unset.
+    /// Read per-program spend threshold. Returns `i128::MAX` when unset (unlimited).
     pub fn get_program_spend_threshold(env: Env, program_id: String) -> i128 {
         let cfg: MultisigConfig = env
             .storage()
@@ -2314,7 +2440,26 @@ impl ProgramEscrowContract {
         cfg.threshold_amount
     }
 
-    fn enforce_spend_threshold(env: &Env, program_id: &String, requested_amount: i128) {
+    /// Returns the spend-limit storage schema version written during `init_program`.
+    /// Returns `0` on legacy deployments where the marker was never written.
+    pub fn get_spend_limit_schema_version(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::SpendLimitSchemaVersion)
+            .unwrap_or(0u32)
+    }
+
+    /// Enforce the per-program spend threshold.
+    ///
+    /// Returns `Err(())` and emits a `SpendLimitExceededEvent` when
+    /// `requested_amount > threshold`. The caller is responsible for
+    /// clearing the reentrancy guard and panicking with the appropriate
+    /// error before any token transfer occurs.
+    fn enforce_spend_threshold(
+        env: &Env,
+        program_id: &String,
+        requested_amount: i128,
+    ) -> Result<(), ()> {
         let cfg: MultisigConfig = env
             .storage()
             .persistent()
@@ -2325,8 +2470,21 @@ impl ProgramEscrowContract {
                 required_signatures: 0,
             });
         if requested_amount > cfg.threshold_amount {
-            panic!("Spend threshold exceeded");
+            // Emit audit event before returning the error so the rejection
+            // is always visible on-chain even if the caller panics.
+            env.events().publish(
+                (SPEND_LIMIT_EXCEEDED, program_id.clone()),
+                SpendLimitExceededEvent {
+                    version: EVENT_VERSION_V2,
+                    program_id: program_id.clone(),
+                    requested_amount,
+                    threshold: cfg.threshold_amount,
+                    timestamp: env.ledger().timestamp(),
+                },
+            );
+            return Err(());
         }
+        Ok(())
     }
 
     pub fn get_analytics(_env: Env) -> Analytics {
@@ -2452,7 +2610,10 @@ impl ProgramEscrowContract {
         // 6. Business logic: sufficient balance
         // Deterministic error ordering: spend threshold check runs before
         // balance/circuit checks, so clients observe stable failures.
-        Self::enforce_spend_threshold(&env, &program_data.program_id, total_payout);
+        if Self::enforce_spend_threshold(&env, &program_data.program_id, total_payout).is_err() {
+            reentrancy_guard::clear_entered(&env);
+            panic!("Spend threshold exceeded");
+        }
 
         if total_payout > program_data.remaining_balance {
             reentrancy_guard::clear_entered(&env);
@@ -2622,7 +2783,10 @@ impl ProgramEscrowContract {
         // 6. Business logic: sufficient balance
         // Deterministic error ordering: spend threshold check runs before
         // balance/circuit checks, so clients observe stable failures.
-        Self::enforce_spend_threshold(&env, &program_data.program_id, amount);
+        if Self::enforce_spend_threshold(&env, &program_data.program_id, amount).is_err() {
+            reentrancy_guard::clear_entered(&env);
+            panic!("Spend threshold exceeded");
+        }
 
         if amount > program_data.remaining_balance {
             reentrancy_guard::clear_entered(&env);

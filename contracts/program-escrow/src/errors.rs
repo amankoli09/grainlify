@@ -518,6 +518,12 @@ pub enum ContractError {
     /// before the current window expires.
     ThresholdWindowNotExpired = 903,
     
+    /// Spend limit exceeded.
+    ///
+    /// This error occurs when a payout operation (single or batch)
+    /// would exceed the configured per-program spend threshold.
+    SpendLimitExceeded = 904,
+    
     // =========================================================================
     // Batch Recovery Errors (1000-1099)
     // =========================================================================
@@ -703,6 +709,7 @@ impl ContractError {
             ContractError::InvalidThresholdConfig => "Invalid threshold configuration",
             ContractError::CooldownActive => "Cooldown active",
             ContractError::ThresholdWindowNotExpired => "Threshold window not expired",
+            ContractError::SpendLimitExceeded => "Spend limit exceeded",
             
             // Batch Recovery Errors
             ContractError::BatchNotFound => "Batch not found",
