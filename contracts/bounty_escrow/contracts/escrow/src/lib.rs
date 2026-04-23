@@ -5267,7 +5267,8 @@ impl BountyEscrowContract {
             if batch_size == 0 {
                 return Err(Error::InvalidBatchSize);
             }
-            if batch_size > MAX_BATCH_SIZE {
+            let max_batch_size = Self::get_max_batch_size(env.clone());
+            if batch_size as u32 > max_batch_size {
                 return Err(Error::InvalidBatchSize);
             }
 
@@ -5494,7 +5495,8 @@ impl BountyEscrowContract {
             if batch_size == 0 {
                 return Err(Error::InvalidBatchSize);
             }
-            if batch_size > MAX_BATCH_SIZE {
+            let max_batch_size = Self::get_max_batch_size(env.clone());
+            if batch_size as u32 > max_batch_size {
                 return Err(Error::InvalidBatchSize);
             }
 
