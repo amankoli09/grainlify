@@ -24,11 +24,15 @@ use soroban_sdk::{
 use soroban_sdk::testutils::Address as _;
 pub mod asset;
 pub mod commit_reveal;
+pub mod error_registry;
 pub mod errors;
 mod governance;
 pub mod nonce;
 pub mod pseudo_randomness;
 pub mod strict_mode;
+
+#[cfg(test)]
+mod test_error_registry;
 
 pub use governance::{GovernanceConfig, Proposal, ProposalStatus, Vote, VoteType, VotingScheme};
 
