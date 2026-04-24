@@ -956,6 +956,30 @@ pub fn emit_participant_filter_entry_updated(env: &Env, event: ParticipantFilter
     env.events().publish(topics, event);
 }
 
+/// Payload emitted after every `query_whitelist` / `query_blocklist` call for
+/// off-chain audit trails.
+///
+/// ### Topics
+/// | Index | Value |
+/// |-------|-------|
+/// | 0 | `"pf_query"` |
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ParticipantFilterQueried {
+    pub list_type: ParticipantFilterListType,
+    pub offset: u32,
+    pub limit: u32,
+    pub result_count: u32,
+    pub total: u32,
+    pub timestamp: u64,
+}
+
+/// Emit [`ParticipantFilterQueried`]
+pub fn emit_participant_filter_queried(env: &Env, event: ParticipantFilterQueried) {
+    let topics = (symbol_short!("pf_query"),);
+    env.events().publish(topics, event);
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // RISK FLAG EVENTS
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1807,5 +1831,32 @@ pub struct FeeRoutingSchemaVersionSet {
 /// Emit [`FeeRoutingSchemaVersionSet`].
 pub fn emit_fee_routing_schema_version_set(env: &Env, event: FeeRoutingSchemaVersionSet) {
     let topics = (symbol_short!("fee_schm"),);
+    env.events().publish(topics, event);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// HIGH-VALUE TIMELOCK QUEUE CANCELLATION EVENT
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Emitted when an admin cancels a pending high-value queued release.
+///
+/// ### Topics
+/// | Index | Value |
+/// |-------|-------|
+/// | 0 | `"hv_cncl"` |
+/// | 1 | `bounty_id: u64` |
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReleaseQueueCancelled {
+    pub version: u32,
+    pub bounty_id: u64,
+    pub contributor: Address,
+    pub amount: i128,
+    pub admin: Address,
+    pub timestamp: u64,
+}
+
+pub fn emit_release_queue_cancelled(env: &Env, event: ReleaseQueueCancelled) {
+    let topics = (symbol_short!("hv_cncl"), event.bounty_id);
     env.events().publish(topics, event);
 }
