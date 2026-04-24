@@ -3,7 +3,7 @@
   "contract_name": "GrainlifyContract",
   "contract_purpose": "Provides secure contract upgrade mechanism with version tracking, migration support, multisig governance, and comprehensive monitoring capabilities",
   "version": {
-    "current": "2.1.0",
+    "current": "2.2.0",
     "schema": "1.0.0",
     "history": [
       {
@@ -25,6 +25,21 @@
           "Comprehensive monitoring and analytics",
           "Improved version management with semantic versioning",
           "Added rollback support"
+        ]
+      },
+      {
+        "version": "2.2.0",
+        "release_date": "2026-04-24",
+        "changes": [
+          "feat(contracts): snapshot/rollback guardrails (#1075)",
+          "create_config_snapshot and restore_config_snapshot now blocked in read-only mode",
+          "confirm_admin_restore now blocked in read-only mode",
+          "Removed duplicate liveness_watchdog returning undefined LivenessStatus type",
+          "Added WatchdogLastPing to DataKey enum (was missing, caused compile error)",
+          "init_admin now writes LivenessSchemaVersion=1 marker",
+          "Added get_liveness_schema_version view entrypoint",
+          "Added snapshot_rollback_guardrails_tests.rs with 15 guardrail test cases",
+          "validate_seed_file.py: added snapshot guardrail manifest check"
         ]
       },
       {
@@ -309,6 +324,18 @@
         "authorization": "any",
         "pausable": false,
         "gas_estimate": "low"
+      },
+      {
+        "name": "get_liveness_schema_version",
+        "description": "Returns the LivenessSchemaVersion marker written at init_admin. Returns 0 on legacy deployments. Increment the marker in init_admin whenever WatchdogStatus layout changes.",
+        "parameters": [],
+        "returns": {
+          "type": "u32",
+          "description": "Schema version (1 after init_admin, 0 on legacy/uninitialised contracts)"
+        },
+        "authorization": "any",
+        "pausable": false,
+        "gas_estimate": "low"
       }
     ],
     "admin": [
@@ -387,6 +414,54 @@
         "authorization": "admin",
         "pausable": true,
         "gas_estimate": "low"
+      },
+      {
+        "name": "create_config_snapshot",
+        "description": "Captures a point-in-time snapshot of admin, version, previous_version, and multisig config. Blocked in read-only mode. Returns the new snapshot ID.",
+        "parameters": [],
+        "returns": {
+          "type": "u64",
+          "description": "Monotonically increasing snapshot ID"
+        },
+        "authorization": "admin",
+        "pausable": false,
+        "gas_estimate": "medium"
+      },
+      {
+        "name": "restore_config_snapshot",
+        "description": "Restores contract config from a snapshot. Blocked in read-only mode. If the snapshot admin differs from the current admin, creates a PendingAdminRestore requiring two-step confirmation.",
+        "parameters": [
+          {
+            "name": "snapshot_id",
+            "type": "u64",
+            "description": "ID of the snapshot to restore"
+          }
+        ],
+        "returns": {
+          "type": "()",
+          "description": "Empty on success; panics if snapshot is pruned or read-only mode is active"
+        },
+        "authorization": "admin",
+        "pausable": false,
+        "gas_estimate": "medium"
+      },
+      {
+        "name": "confirm_admin_restore",
+        "description": "Finalises a pending two-step admin restore. Must be called by the proposed new admin address. Blocked in read-only mode. Panics if the pending restore has expired.",
+        "parameters": [
+          {
+            "name": "snapshot_id",
+            "type": "u64",
+            "description": "Snapshot ID matching the pending restore"
+          }
+        ],
+        "returns": {
+          "type": "()",
+          "description": "Empty on success"
+        },
+        "authorization": "admin",
+        "pausable": false,
+        "gas_estimate": "medium"
       }
     ]
   },
@@ -467,7 +542,10 @@
       "Health check capabilities",
       "Invariant verification",
       "Liveness watchdog view: consolidated pause/read-only/health/ping/version snapshot (no auth, never panics)",
-      "Watchdog ping: admin-only liveness proof with read-only mode guard"
+      "Watchdog ping: admin-only liveness proof with read-only mode guard",
+      "Snapshot/rollback guardrails: create_config_snapshot and restore_config_snapshot are blocked in read-only mode — prevents state mutation during incidents",
+      "Two-step admin restore: restoring a snapshot that changes the admin address requires confirmation from the new admin address, preventing silent admin takeover",
+      "Pending admin restore expiry: unconfirmed admin restores expire after DEFAULT_TIMELOCK_DELAY (24h) to prevent dangling restore requests"
     ],
     "access_control": [
       {

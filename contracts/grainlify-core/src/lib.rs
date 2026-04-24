@@ -385,8 +385,11 @@ enum DataKey {
     /// [FIX-C02] Pending admin restore awaiting new-admin confirmation
     PendingAdminRestore,
     /// Upgrade-safe schema version marker for liveness watchdog storage.
-    /// Written on init_admin; increment when LivenessStatus layout changes.
+    /// Written on init_admin; increment when WatchdogStatus layout changes.
     LivenessSchemaVersion,
+    /// Ledger timestamp of the last successful ping_watchdog call.
+    /// 0 / absent means never pinged.
+    WatchdogLastPing,
 }
 
 // ============================================================================
@@ -717,6 +720,10 @@ mod test_strict_mode;
 mod build_info_event_tests {
     include!("test/build_info_event_tests.rs");
 }
+#[cfg(test)]
+mod snapshot_rollback_guardrails_tests {
+    include!("test/snapshot_rollback_guardrails_tests.rs");
+}
 
 // ==================== END MONITORING MODULE ====================
 
@@ -736,7 +743,9 @@ impl GrainlifyContract {
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::Version, &VERSION);
         env.storage().instance().set(&DataKey::ReadOnlyMode, &false);
-        
+        // Write liveness schema version marker so watchdog can detect layout changes
+        env.storage().instance().set(&DataKey::LivenessSchemaVersion, &1u32);
+
         // Emit BuildInfo event for initialization tracking and auditing
         env.events().publish(
             (symbol_short!("init"), symbol_short!("build")),
@@ -989,6 +998,8 @@ impl GrainlifyContract {
     pub fn create_config_snapshot(env: Env) -> u64 {
         let admin: Address = env.storage().instance().get(&DataKey::Admin).expect("Admin not set");
         admin.require_auth();
+        // [GUARDRAIL] Snapshots are state mutations — blocked in read-only mode
+        Self::require_not_read_only(&env);
 
         let next_id: u64 = env.storage().instance()
             .get(&DataKey::SnapshotCounter).unwrap_or(0) + 1;
@@ -1096,6 +1107,8 @@ impl GrainlifyContract {
         let admin: Address = env.storage().instance()
             .get(&DataKey::Admin).expect("Admin not set");
         admin.require_auth();
+        // [GUARDRAIL] Restores mutate state — blocked in read-only mode
+        Self::require_not_read_only(&env);
 
         // [FIX-M02] Explicit error when snapshot is pruned
         let snapshot: CoreConfigSnapshot = env.storage().instance()
@@ -1149,6 +1162,9 @@ impl GrainlifyContract {
 
         // The proposed new admin must authorize this
         pending.proposed_admin.require_auth();
+
+        // [GUARDRAIL] Confirm is a state mutation — blocked in read-only mode
+        Self::require_not_read_only(&env);
 
         // Check expiry
         if env.ledger().timestamp() > pending.expires_at {
@@ -1319,53 +1335,6 @@ impl GrainlifyContract {
         MultiSig::is_contract_paused(&env)
     }
 
-    /// Unified liveness watchdog view.
-    ///
-    /// Returns a single `LivenessStatus` snapshot combining pause state,
-    /// read-only mode, version, and admin presence. Designed for polling by
-    /// monitoring agents, circuit breakers, and dashboards.
-    ///
-    /// # No Authorization Required
-    /// This is a pure read — no auth, no state mutation.
-    ///
-    /// # Upgrade Safety
-    /// `schema_version` reflects the `LivenessSchemaVersion` written at init.
-    /// Returns `0` on legacy deployments where the marker was never written.
-    pub fn liveness_watchdog(env: Env) -> LivenessStatus {
-        let is_paused = MultiSig::is_contract_paused(&env);
-        let is_read_only: bool = env
-            .storage()
-            .instance()
-            .get(&DataKey::ReadOnlyMode)
-            .unwrap_or(false);
-        LivenessStatus {
-            is_paused,
-            is_read_only,
-            is_operational: !is_paused && !is_read_only,
-            version: env
-                .storage()
-                .instance()
-                .get(&DataKey::Version)
-                .unwrap_or(0),
-            admin_set: env.storage().instance().has(&DataKey::Admin),
-            timestamp: env.ledger().timestamp(),
-            schema_version: env
-                .storage()
-                .instance()
-                .get(&DataKey::LivenessSchemaVersion)
-                .unwrap_or(0),
-        }
-    }
-
-    /// Returns the liveness schema version written at init.
-    /// Returns `0` on legacy deployments where the marker was never written.
-    pub fn get_liveness_schema_version(env: Env) -> u32 {
-        env.storage()
-            .instance()
-            .get(&DataKey::LivenessSchemaVersion)
-            .unwrap_or(0)
-    }
-
     pub fn can_execute(env: Env, proposal_id: u64) -> bool {
         MultiSig::can_execute(&env, proposal_id)
     }
@@ -1427,6 +1396,16 @@ impl GrainlifyContract {
             (symbol_short!("watchdog"), symbol_short!("ping")),
             (admin, ts),
         );
+    }
+
+    /// Returns the liveness schema version written at `init_admin`.
+    /// Returns `0` on legacy deployments where the marker was never written.
+    /// Increment `LivenessSchemaVersion` in `init_admin` whenever `WatchdogStatus` layout changes.
+    pub fn get_liveness_schema_version(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::LivenessSchemaVersion)
+            .unwrap_or(0)
     }
 
     // ========================================================================

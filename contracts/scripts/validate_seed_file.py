@@ -30,6 +30,13 @@ _VALID_AUTH = {"admin", "signer", "any", "capability", "multisig"}
 _VALID_NETWORKS = {"testnet", "mainnet", "futurenet", "local"}
 _VALID_DEPLOYMENT_STATUS = {"deployed", "upgraded", "rolled_back", "failed"}
 
+# Snapshot/rollback guardrail: manifest behaviors that must be present when
+# the contract exposes snapshot entrypoints.
+_SNAPSHOT_ENTRYPOINTS = {"create_config_snapshot", "restore_config_snapshot"}
+_REQUIRED_SNAPSHOT_SECURITY_FEATURES = {
+    "read-only mode",  # substring match — case-insensitive
+}
+
 
 def _load_json(path: Path):
     try:
@@ -80,6 +87,29 @@ def _basic_manifest_checks(manifest: dict, path: Path) -> list[str]:
             continue
         if auth not in _VALID_AUTH:
             errors.append(f"{path.name}: invalid authorization value {auth!r}")
+
+    # Snapshot/rollback guardrail: if the manifest exposes snapshot entrypoints,
+    # it must document at least one read-only-mode security feature so reviewers
+    # know mutations are blocked during incidents.
+    all_entrypoint_names: set[str] = set()
+    for section in (manifest.get("entrypoints") or {}).values():
+        if isinstance(section, list):
+            for ep in section:
+                if isinstance(ep, dict) and isinstance(ep.get("name"), str):
+                    all_entrypoint_names.add(ep["name"])
+
+    if _SNAPSHOT_ENTRYPOINTS & all_entrypoint_names:
+        security_features: list = (
+            (manifest.get("behaviors") or {}).get("security_features") or []
+        )
+        feature_text = " ".join(f.lower() for f in security_features if isinstance(f, str))
+        for required in _REQUIRED_SNAPSHOT_SECURITY_FEATURES:
+            if required not in feature_text:
+                errors.append(
+                    f"{path.name}: manifest exposes snapshot entrypoints but "
+                    f"behaviors.security_features does not mention {required!r} — "
+                    f"add a note confirming snapshot mutations are blocked in read-only mode"
+                )
 
     return errors
 
