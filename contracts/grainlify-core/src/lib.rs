@@ -401,6 +401,8 @@ enum DataKey {
     /// Upgrade-safe schema version marker for liveness watchdog storage.
     /// Written on init_admin; increment when LivenessStatus layout changes.
     LivenessSchemaVersion,
+    /// Timestamp of the last successful ping_watchdog call.
+    WatchdogLastPing,
 }
 
 // ============================================================================
