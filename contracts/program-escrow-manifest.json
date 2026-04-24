@@ -265,6 +265,39 @@
         "gas_estimate": "low"
       },
       {
+        "name": "set_program_spending_limit",
+        "description": "Set or update the per-window spending limit for a program. Only the program's authorized_payout_key may call this.",
+        "parameters": [
+          {
+            "name": "program_id",
+            "type": "String",
+            "description": "Program identifier"
+          },
+          {
+            "name": "window_size",
+            "type": "u64",
+            "description": "Window length in seconds (must be > 0)"
+          },
+          {
+            "name": "max_amount",
+            "type": "i128",
+            "description": "Maximum total releasable in one window (must be >= 0)"
+          },
+          {
+            "name": "enabled",
+            "type": "bool",
+            "description": "If false, config is stored but not enforced"
+          }
+        ],
+        "returns": {
+          "type": "()",
+          "description": "Empty on success"
+        },
+        "authorization": "authorized_payout_key",
+        "pausable": false,
+        "gas_estimate": "low"
+      },
+      {
         "name": "set_program_dependencies",
         "description": "Set dependencies for a program",
         "parameters": [
@@ -488,6 +521,42 @@
         "returns": {
           "type": "u32",
           "description": "Schema version (1 = current; 0 = legacy pre-v2.3)"
+        },
+        "authorization": "any",
+        "pausable": false,
+        "gas_estimate": "low"
+      },
+      {
+        "name": "get_program_spending_limit",
+        "description": "Return the per-window spending limit configuration for a program, or None if not set.",
+        "parameters": [
+          {
+            "name": "program_id",
+            "type": "String",
+            "description": "Program identifier"
+          }
+        ],
+        "returns": {
+          "type": "Option<ProgramSpendingConfig>",
+          "description": "Spending limit config (window_size, max_amount, enabled), or None"
+        },
+        "authorization": "any",
+        "pausable": false,
+        "gas_estimate": "low"
+      },
+      {
+        "name": "get_program_spending_state",
+        "description": "Return the current window state for a program's spending limit, or None if no payout has occurred yet.",
+        "parameters": [
+          {
+            "name": "program_id",
+            "type": "String",
+            "description": "Program identifier"
+          }
+        ],
+        "returns": {
+          "type": "Option<ProgramSpendingState>",
+          "description": "Window state (window_start, amount_released), or None"
         },
         "authorization": "any",
         "pausable": false,

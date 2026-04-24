@@ -2774,6 +2774,131 @@ impl ProgramEscrowContract {
         Ok(())
     }
 
+    // ========================================================================
+    // Per-Window Spending Limits (Issue #25)
+    // ========================================================================
+
+    /// Set or update the per-window spending limit for a program.
+    ///
+    /// Only the program's `authorized_payout_key` may call this.
+    ///
+    /// # Arguments
+    /// * `program_id`   - Program to configure.
+    /// * `window_size`  - Window length in seconds (must be > 0).
+    /// * `max_amount`   - Max total releasable in one window (must be >= 0).
+    /// * `enabled`      - `false` stores the config without enforcing it.
+    pub fn set_program_spending_limit(
+        env: Env,
+        program_id: String,
+        window_size: u64,
+        max_amount: i128,
+        enabled: bool,
+    ) {
+        let program_data = Self::get_program_data_by_id(&env, &program_id);
+        program_data.authorized_payout_key.require_auth();
+
+        if window_size == 0 {
+            panic!("window_size must be greater than zero");
+        }
+        if max_amount < 0 {
+            panic!("max_amount must be non-negative");
+        }
+
+        let cfg = ProgramSpendingConfig {
+            window_size,
+            max_amount,
+            enabled,
+        };
+        env.storage()
+            .persistent()
+            .set(&DataKey::SpendingConfig(program_id), &cfg);
+    }
+
+    /// Return the spending limit configuration for a program, if set.
+    pub fn get_program_spending_limit(env: Env, program_id: String) -> Option<ProgramSpendingConfig> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::SpendingConfig(program_id))
+    }
+
+    /// Return the current window state for a program's spending limit, if any.
+    pub fn get_program_spending_state(env: Env, program_id: String) -> Option<ProgramSpendingState> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::SpendingState(program_id))
+    }
+
+    /// Enforce the per-window spending limit and update the window state.
+    ///
+    /// Called before any token transfer. Emits `(limit, prog_spend)` and panics
+    /// with "Program spending limit exceeded for current window" when the limit
+    /// would be exceeded.
+    ///
+    /// If no config is set or `enabled` is `false`, this is a no-op.
+    fn enforce_spending_window(env: &Env, program_id: &String, amount: i128) {
+        let cfg: ProgramSpendingConfig = match env
+            .storage()
+            .persistent()
+            .get(&DataKey::SpendingConfig(program_id.clone()))
+        {
+            Some(c) => c,
+            None => return,
+        };
+
+        if !cfg.enabled {
+            return;
+        }
+
+        let now = env.ledger().timestamp();
+        let mut state: ProgramSpendingState = env
+            .storage()
+            .persistent()
+            .get(&DataKey::SpendingState(program_id.clone()))
+            .unwrap_or(ProgramSpendingState {
+                window_start: now,
+                amount_released: 0,
+            });
+
+        // Reset window if expired
+        if now.saturating_sub(state.window_start) >= cfg.window_size {
+            state.window_start = now;
+            state.amount_released = 0;
+        }
+
+        let new_total = state
+            .amount_released
+            .checked_add(amount)
+            .unwrap_or_else(|| panic!("Spending window overflow"));
+
+        if new_total > cfg.max_amount {
+            let program_data: ProgramData = env
+                .storage()
+                .instance()
+                .get(&PROGRAM_DATA)
+                .unwrap_or_else(|| panic!("Program not initialized"));
+
+            // Emit rejection event before panicking (CEI: event before state change)
+            env.events().publish(
+                (PROG_SPEND_LIMIT, symbol_short!("prg_spend")),
+                (
+                    program_id.clone(),
+                    program_data.token_address,
+                    amount,
+                    new_total,
+                    cfg.max_amount,
+                    cfg.window_size,
+                ),
+            );
+            panic!("Program spending limit exceeded for current window");
+        }
+
+        // Commit updated state
+        state.amount_released = new_total;
+        env.storage()
+            .persistent()
+            .set(&DataKey::SpendingState(program_id.clone()), &state);
+    }
+
     pub fn get_analytics(_env: Env) -> Analytics {
         Analytics {
             total_locked: 0,
@@ -3121,6 +3246,9 @@ impl ProgramEscrowContract {
             panic!("Spend threshold exceeded");
         }
 
+        // Per-window spending limit check (after per-payout threshold, before balance)
+        Self::enforce_spending_window(&env, &program_data.program_id, total_payout);
+
         if total_payout > program_data.remaining_balance {
             reentrancy_guard::clear_entered(&env);
             panic!("Insufficient balance");
@@ -3293,6 +3421,9 @@ impl ProgramEscrowContract {
             reentrancy_guard::clear_entered(&env);
             panic!("Spend threshold exceeded");
         }
+
+        // Per-window spending limit check (after per-payout threshold, before balance)
+        Self::enforce_spending_window(&env, &program_data.program_id, amount);
 
         if amount > program_data.remaining_balance {
             reentrancy_guard::clear_entered(&env);
@@ -4192,6 +4323,9 @@ impl ProgramEscrowContract {
                     panic!("Already released");
                 }
 
+                // Per-window spending limit check before transfer
+                Self::enforce_spending_window(&env, &program_data.program_id, s.amount);
+
                 // Transfer funds
                 let token_client = token::Client::new(&env, &program_data.token_address);
                 token_client.transfer(&env.current_contract_address(), &s.recipient, &s.amount);
@@ -4252,6 +4386,9 @@ impl ProgramEscrowContract {
                 if now < s.release_timestamp {
                     panic!("Not yet due");
                 }
+
+                // Per-window spending limit check before transfer
+                Self::enforce_spending_window(&env, &program_data.program_id, s.amount);
 
                 // Transfer funds
                 let token_client = token::Client::new(&env, &program_data.token_address);
