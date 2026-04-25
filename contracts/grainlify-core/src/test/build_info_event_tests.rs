@@ -3,6 +3,7 @@
 // Tests for the `BuildInfo` event emission during contract initialization.
 
 extern crate std;
+use std::vec::Vec;
 
 use soroban_sdk::{
     testutils::{Address as _, Events},

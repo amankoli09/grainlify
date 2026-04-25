@@ -24,11 +24,15 @@ use soroban_sdk::{
 use soroban_sdk::testutils::Address as _;
 pub mod asset;
 pub mod commit_reveal;
+pub mod error_registry;
 pub mod errors;
 mod governance;
 pub mod nonce;
 pub mod pseudo_randomness;
 pub mod strict_mode;
+
+#[cfg(test)]
+mod test_error_registry;
 
 pub use governance::{GovernanceConfig, Proposal, ProposalStatus, Vote, VoteType, VotingScheme};
 
@@ -1336,17 +1340,15 @@ impl GrainlifyContract {
         MultiSig::is_contract_paused(&env)
     }
 
-    /// Unified liveness watchdog view.
+    /// Unified liveness watchdog view — no auth required, never panics.
     ///
-    /// Returns a single `LivenessStatus` snapshot combining pause state,
-    /// read-only mode, version, and admin presence. Designed for polling by
-    /// monitoring agents, circuit breakers, and dashboards.
-    ///
-    /// # No Authorization Required
-    /// This is a pure read — no auth, no state mutation.
+    /// Returns a `LivenessStatus` snapshot combining pause state, read-only
+    /// mode, monitoring health, last-ping timestamp, version, and admin
+    /// presence.  Designed for polling by monitoring agents, circuit breakers,
+    /// and dashboards.
     ///
     /// # Upgrade Safety
-    /// `schema_version` reflects the `LivenessSchemaVersion` written at init.
+    /// `schema_version` reflects `LivenessSchemaVersion` written at `init_admin`.
     /// Returns `0` on legacy deployments where the marker was never written.
     pub fn liveness_watchdog(env: Env) -> LivenessStatus {
         let is_paused = MultiSig::is_contract_paused(&env);
@@ -1355,22 +1357,33 @@ impl GrainlifyContract {
             .instance()
             .get(&DataKey::ReadOnlyMode)
             .unwrap_or(false);
+        let version: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::Version)
+            .unwrap_or(0);
+        let healthy = monitoring::check_invariants(&env).healthy;
+        let last_ping_ts: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::WatchdogLastPing)
+            .unwrap_or(0);
         LivenessStatus {
             is_paused,
             is_read_only,
             is_operational: !is_paused && !is_read_only,
-            version: env
-                .storage()
-                .instance()
-                .get(&DataKey::Version)
-                .unwrap_or(0),
             admin_set: env.storage().instance().has(&DataKey::Admin),
-            timestamp: env.ledger().timestamp(),
             schema_version: env
                 .storage()
                 .instance()
                 .get(&DataKey::LivenessSchemaVersion)
                 .unwrap_or(0),
+            timestamp: env.ledger().timestamp(),
+            paused: is_paused,
+            read_only: is_read_only,
+            healthy,
+            last_ping_ts,
+            version,
         }
     }
 
