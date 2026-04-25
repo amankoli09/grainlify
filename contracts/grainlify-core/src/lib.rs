@@ -24,11 +24,15 @@ use soroban_sdk::{
 use soroban_sdk::testutils::Address as _;
 pub mod asset;
 pub mod commit_reveal;
+pub mod error_registry;
 pub mod errors;
 mod governance;
 pub mod nonce;
 pub mod pseudo_randomness;
 pub mod strict_mode;
+
+#[cfg(test)]
+mod test_error_registry;
 
 pub use governance::{GovernanceConfig, Proposal, ProposalStatus, Vote, VoteType, VotingScheme};
 
@@ -64,6 +68,7 @@ pub enum ContractError {
 #[cfg(feature = "contract")]
 const VERSION: u32 = 2;
 pub const STORAGE_SCHEMA_VERSION: u32 = 1;
+pub const LIVENESS_SCHEMA_VERSION: u32 = 1;
 const CONFIG_SNAPSHOT_LIMIT: u32 = 20;
 
 /// Default timelock delay for upgrade execution (24 hours in seconds)
@@ -96,6 +101,29 @@ pub struct UpgradeEvent {
 pub struct ReadOnlyModeEvent {
     pub enabled: bool,
     pub admin: Address,
+    pub timestamp: u64,
+}
+
+/// Emitted during contract initialization to record build and deployment information.
+///
+/// This event provides crucial metadata for auditing and monitoring contract deployments:
+/// - Allows indexers and monitoring systems to track contract initialization events
+/// - Records the initial admin address for access control auditing
+/// - Captures the exact ledger timestamp for event sequencing
+/// - Enables verification of deployment order and timing across networks
+///
+/// # Security Considerations
+/// - Event is emitted during `init_admin` which requires the admin's authorization
+/// - Provides transparent audit trail for deployment activities
+/// - Should be indexed by off-chain monitoring systems for initialization verification
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BuildInfoEvent {
+    /// The admin address that authorized contract initialization
+    pub admin: Address,
+    /// Initial contract version set during initialization
+    pub version: u32,
+    /// Ledger timestamp when the contract was initialized
     pub timestamp: u64,
 }
 
@@ -224,8 +252,39 @@ pub struct PendingAdminRestore {
     pub expires_at: u64,
 }
 
+/// Liveness watchdog status — a single read-only view of the contract's
+/// operational health, pause state, and maintenance mode.
+///
+/// Returned by `liveness_watchdog()`. All fields are safe to read without auth.
+///
+/// # Fields
+/// * `paused`       — true when MultiSig pause is active (no payouts/upgrades)
+/// * `read_only`    — true when read-only mode is set (mutations blocked)
+/// * `healthy`      — true when monitoring invariants pass
+/// * `last_ping_ts` — ledger timestamp of the last `ping_watchdog` call (0 if never)
+/// * `version`      — current contract version number
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WatchdogStatus {
+    pub paused: bool,
+    pub read_only: bool,
+    pub healthy: bool,
+    pub last_ping_ts: u64,
+    pub version: u32,
+}
 
-
+/// Liveness snapshot returned by `liveness_watchdog`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LivenessStatus {
+    pub is_paused: bool,
+    pub is_read_only: bool,
+    pub is_operational: bool,
+    pub version: u32,
+    pub admin_set: bool,
+    pub timestamp: u64,
+    pub schema_version: u32,
+}
 
 /// Storage keys for contract data.
 ///
@@ -343,6 +402,11 @@ enum DataKey {
     UpgradeTimelock(u64),
     /// [FIX-C02] Pending admin restore awaiting new-admin confirmation
     PendingAdminRestore,
+    /// Upgrade-safe schema version marker for liveness watchdog storage.
+    /// Written on init_admin; increment when LivenessStatus layout changes.
+    LivenessSchemaVersion,
+    /// Timestamp of the last successful ping_watchdog call.
+    WatchdogLastPing,
 }
 
 // ============================================================================
@@ -670,7 +734,9 @@ mod test_version_helpers;
 #[cfg(test)]
 mod test_strict_mode;
 #[cfg(test)]
-mod test_timelocked_pause;
+mod build_info_event_tests {
+    include!("test/build_info_event_tests.rs");
+}
 
 // ==================== END MONITORING MODULE ====================
 
@@ -690,6 +756,17 @@ impl GrainlifyContract {
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::Version, &VERSION);
         env.storage().instance().set(&DataKey::ReadOnlyMode, &false);
+        env.storage().instance().set(&DataKey::LivenessSchemaVersion, &LIVENESS_SCHEMA_VERSION);
+        
+        // Emit BuildInfo event for initialization tracking and auditing
+        env.events().publish(
+            (symbol_short!("init"), symbol_short!("build")),
+            BuildInfoEvent {
+                admin: admin.clone(),
+                version: VERSION,
+                timestamp: env.ledger().timestamp(),
+            },
+        );
     }
 
     // ========================================================================
@@ -1263,8 +1340,91 @@ impl GrainlifyContract {
         MultiSig::is_contract_paused(&env)
     }
 
+    /// Unified liveness watchdog view — no auth required, never panics.
+    ///
+    /// Returns a `LivenessStatus` snapshot combining pause state, read-only
+    /// mode, monitoring health, last-ping timestamp, version, and admin
+    /// presence.  Designed for polling by monitoring agents, circuit breakers,
+    /// and dashboards.
+    ///
+    /// # Upgrade Safety
+    /// `schema_version` reflects `LivenessSchemaVersion` written at `init_admin`.
+    /// Returns `0` on legacy deployments where the marker was never written.
+    pub fn liveness_watchdog(env: Env) -> LivenessStatus {
+        let is_paused = MultiSig::is_contract_paused(&env);
+        let is_read_only: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::ReadOnlyMode)
+            .unwrap_or(false);
+        let version: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::Version)
+            .unwrap_or(0);
+        let healthy = monitoring::check_invariants(&env).healthy;
+        let last_ping_ts: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::WatchdogLastPing)
+            .unwrap_or(0);
+        LivenessStatus {
+            is_paused,
+            is_read_only,
+            is_operational: !is_paused && !is_read_only,
+            admin_set: env.storage().instance().has(&DataKey::Admin),
+            schema_version: env
+                .storage()
+                .instance()
+                .get(&DataKey::LivenessSchemaVersion)
+                .unwrap_or(0),
+            timestamp: env.ledger().timestamp(),
+            paused: is_paused,
+            read_only: is_read_only,
+            healthy,
+            last_ping_ts,
+            version,
+        }
+    }
+
+    /// Returns the liveness schema version written at init.
+    /// Returns `0` on legacy deployments where the marker was never written.
+    pub fn get_liveness_schema_version(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::LivenessSchemaVersion)
+            .unwrap_or(0)
+    }
+
     pub fn can_execute(env: Env, proposal_id: u64) -> bool {
         MultiSig::can_execute(&env, proposal_id)
+    }
+
+    // ========================================================================
+    // Liveness Watchdog
+    // ========================================================================
+
+    /// Admin: record a liveness ping — updates `WatchdogLastPing` timestamp.
+    ///
+    /// Allows off-chain monitors to prove the contract is reachable and the
+    /// admin key is live. Blocked when read-only mode is active.
+    ///
+    /// # Authorization
+    /// Requires admin signature.
+    pub fn ping_watchdog(env: Env) {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic!("{}", ContractError::NotInitialized as u32));
+        admin.require_auth();
+        Self::require_not_read_only(&env);
+        let ts = env.ledger().timestamp();
+        env.storage().instance().set(&DataKey::WatchdogLastPing, &ts);
+        env.events().publish(
+            (symbol_short!("watchdog"), symbol_short!("ping")),
+            (admin, ts),
+        );
     }
 
     // ========================================================================

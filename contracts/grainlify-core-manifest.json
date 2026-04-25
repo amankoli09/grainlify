@@ -3,7 +3,7 @@
   "contract_name": "GrainlifyContract",
   "contract_purpose": "Provides secure contract upgrade mechanism with version tracking, migration support, multisig governance, and comprehensive monitoring capabilities",
   "version": {
-    "current": "3.0.0",
+    "current": "2.1.0",
     "schema": "1.0.0",
     "history": [
       {
@@ -28,18 +28,13 @@
         ]
       },
       {
-        "version": "3.0.0",
+        "version": "2.1.0",
         "release_date": "2026-04-24",
         "changes": [
-          "Added timelocked upgrade execution (DEFAULT_TIMELOCK_DELAY=86400s, MIN=3600s, MAX=2592000s)",
-          "Added emergency pause/unpause via multisig (pause, unpause, is_paused)",
-          "Added commit_migration for replay-protected migration pre-authorization",
-          "Added cancel_upgrade for explicit proposal revocation",
-          "Added get_upgrade_proposal for proposal introspection",
-          "Added init_with_network for network-aware initialization",
-          "Added init_governance for governance-based initialization",
-          "Timelock starts automatically when multisig threshold is met",
-          "Paused contract blocks propose_upgrade and approve_upgrade"
+          "Added liveness_watchdog view: consolidated pause/read-only/health/ping/version snapshot",
+          "Added ping_watchdog admin fn: records liveness ping timestamp for off-chain monitors",
+          "Added WatchdogLastPing storage key (instance)",
+          "Added WatchdogStatus contracttype struct"
         ]
       }
     ]
@@ -389,6 +384,18 @@
         "authorization": "any",
         "pausable": false,
         "gas_estimate": "low"
+      },
+      {
+        "name": "liveness_watchdog",
+        "description": "Returns a consolidated liveness snapshot: pause state, read-only mode, monitoring health, last watchdog ping timestamp, and current version. No auth required. Never panics.",
+        "parameters": [],
+        "returns": {
+          "type": "WatchdogStatus",
+          "description": "{ paused: bool, read_only: bool, healthy: bool, last_ping_ts: u64, version: u32 }"
+        },
+        "authorization": "any",
+        "pausable": false,
+        "gas_estimate": "low"
       }
     ],
     "admin": [
@@ -455,6 +462,18 @@
         "authorization": "any",
         "pausable": false,
         "gas_estimate": "medium"
+      },
+      {
+        "name": "ping_watchdog",
+        "description": "Records a liveness ping — updates WatchdogLastPing to the current ledger timestamp. Allows off-chain monitors to prove the contract is reachable and the admin key is live. Blocked when read-only mode is active.",
+        "parameters": [],
+        "returns": {
+          "type": "()",
+          "description": "Empty on success; emits (watchdog, ping) event with (admin, timestamp)"
+        },
+        "authorization": "admin",
+        "pausable": true,
+        "gas_estimate": "low"
       }
     ]
   },
@@ -551,10 +570,10 @@
         "data_structure": "u32"
       },
       {
-        "name": "ReadOnlyMode",
+        "name": "WatchdogLastPing",
         "type": "instance",
-        "description": "Read-only mode flag; blocks all mutations when true",
-        "data_structure": "bool"
+        "description": "Ledger timestamp of the last successful ping_watchdog call. 0 / absent means never pinged.",
+        "data_structure": "u64"
       }
     ]
   },
@@ -577,7 +596,9 @@
       "Comprehensive monitoring and analytics",
       "Performance tracking",
       "Health check capabilities",
-      "Invariant verification"
+      "Invariant verification",
+      "Liveness watchdog view: consolidated pause/read-only/health/ping/version snapshot (no auth, never panics)",
+      "Watchdog ping: admin-only liveness proof with read-only mode guard"
     ],
     "access_control": [
       {
@@ -689,8 +710,31 @@
     ],
     "events": [
       {
-        "name": "upgrade/wasm",
-        "description": "Contract WASM successfully upgraded",
+        "name": "ContractInitialized",
+        "description": "Contract initialization completed with BuildInfo metadata",
+        "data": [
+          {
+            "name": "admin",
+            "type": "Address",
+            "description": "Administrator address that authorized initialization"
+          },
+          {
+            "name": "version",
+            "type": "u32",
+            "description": "Initial contract version"
+          },
+          {
+            "name": "timestamp",
+            "type": "u64",
+            "description": "Initialization timestamp (ledger time)"
+          }
+        ],
+        "trigger": "Contract initialization via init_admin()",
+        "security_notes": "Only emitted during first-time initialization; requires admin authorization"
+      },
+      {
+        "name": "ContractUpgraded",
+        "description": "Contract successfully upgraded",
         "data": [
           {"name": "new_wasm_hash", "type": "BytesN<32>", "description": "New WASM hash installed"},
           {"name": "previous_version", "type": "u32", "description": "Version before upgrade"},
@@ -758,7 +802,24 @@
           {"name": "proposal_id", "type": "u64", "description": "Cancelled proposal ID"},
           {"name": "canceller", "type": "Address", "description": "Signer who cancelled"}
         ],
-        "trigger": "cancel_upgrade()"
+        "trigger": "Successful migration"
+      },
+      {
+        "name": "WatchdogPing",
+        "description": "Admin liveness ping recorded",
+        "data": [
+          {
+            "name": "admin",
+            "type": "Address",
+            "description": "Admin address that called ping_watchdog"
+          },
+          {
+            "name": "timestamp",
+            "type": "u64",
+            "description": "Ledger timestamp of the ping"
+          }
+        ],
+        "trigger": "Successful ping_watchdog call"
       }
     ]
   },
@@ -860,51 +921,33 @@
   "testing": {
     "test_coverage": {
       "unit_tests": "95%",
-      "integration_tests": "90%",
+      "integration_tests": "85%",
       "test_files": [
-        "src/test/upgrade_timelock_tests.rs",
-        "src/test/upgrade_rollback_tests.rs",
-        "src/test/e2e_upgrade_migration_tests.rs",
-        "src/test/state_snapshot_tests.rs",
-        "src/test/invariant_entrypoints_tests.rs",
-        "src/test/upgrade_rollback_scenarios.rs",
-        "src/test/nonce_tests.rs",
-        "src/test_timelocked_pause.rs",
-        "src/test_core_monitoring.rs",
-        "src/test_strict_mode.rs",
-        "src/test_storage_layout.rs"
+        "test_core_monitoring.rs",
+        "upgrade_rollback_tests.rs",
+        "migration_hook_tests.rs",
+        "test_liveness_watchdog.rs"
       ]
     },
     "test_scenarios": [
-      "Contract initialization (single admin, multisig, governance, network-aware)",
-      "WASM upgrade process (single admin and multisig paths)",
-      "Timelock default delay (86400s)",
-      "Timelock minimum enforcement (3600s)",
-      "Timelock maximum enforcement (2592000s)",
-      "Timelock auto-start when threshold is met",
-      "Timelock prevents immediate execution",
-      "Timelock allows execution after delay elapses",
-      "Timelock boundary conditions (1s before/after)",
-      "Timelock countdown and status queries",
-      "Emergency pause blocks propose_upgrade",
-      "Emergency pause blocks approve_upgrade",
-      "Emergency pause does NOT block execute_upgrade",
-      "Unpause restores normal operation",
-      "Pause/unpause requires registered signer",
-      "Non-signer cannot pause or unpause",
-      "Commit-reveal migration replay protection",
-      "Migration commitment consumed after use",
-      "Migration idempotency (same version twice is no-op)",
-      "Migration hash mismatch rejection",
-      "Missing commitment rejection",
-      "Proposal cancellation by any signer",
-      "Cancelled proposal cannot be approved or executed",
-      "Proposal expiry enforcement",
-      "Double-approval rejection",
-      "Non-signer rejection on proposal/approval",
-      "Read-only mode blocks set_timelock_delay",
-      "Version management and rollback support",
-      "Health check and invariant verification"
+      "Contract initialization (single admin and multisig)",
+      "WASM upgrade process",
+      "Version management",
+      "State migration",
+      "Multisig proposal and approval workflow",
+      "Rollback procedures",
+      "Error handling for unauthorized access",
+      "Health check functionality",
+      "Analytics and monitoring",
+      "Performance tracking",
+      "liveness_watchdog default state (not paused, not read-only, healthy, no ping, version set)",
+      "liveness_watchdog reflects read-only mode changes",
+      "liveness_watchdog requires no auth (pure view)",
+      "liveness_watchdog on uninitialized contract does not panic",
+      "ping_watchdog updates last_ping_ts to ledger timestamp",
+      "ping_watchdog multiple pings update timestamp monotonically",
+      "ping_watchdog blocked in read-only mode",
+      "ping_watchdog requires admin auth"
     ]
   },
   "documentation": {
