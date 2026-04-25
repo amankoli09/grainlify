@@ -1276,6 +1276,8 @@ mod reentrancy_guard;
 // #[cfg(test)] mod test_token_math; // pre-existing breakage
 // #[cfg(test)] mod test_circuit_breaker_audit; // pre-existing breakage
 // #[cfg(test)] mod error_recovery_tests; // pre-existing breakage
+#[cfg(test)]
+mod test_circuit_breaker_enforcement;
 #[cfg(any())]
 mod reentrancy_tests;
 // #[cfg(test)] mod test_dispute_resolution; // pre-existing breakage
@@ -3075,6 +3077,14 @@ impl ProgramEscrowContract {
         error_recovery::get_circuit_admin(&env)
     }
 
+    /// Return a full snapshot of the circuit breaker state.
+    ///
+    /// Upgrade-safe: reads from persistent storage; returns defaults for
+    /// legacy deployments that have never written circuit breaker state.
+    pub fn get_circuit_breaker_status(env: Env) -> error_recovery::CircuitBreakerStatus {
+        error_recovery::get_status(&env)
+    }
+
     pub fn reset_circuit_breaker(env: Env, caller: Address) {
         caller.require_auth();
         let admin = error_recovery::get_circuit_admin(&env).expect("Circuit admin not set");
@@ -3756,6 +3766,18 @@ impl ProgramEscrowContract {
             bail!(BatchPayoutError::DisputeOpen);
         }
 
+        // 3c. Circuit breaker check — runs before all business logic so that
+        //     an open circuit produces a deterministic, stable rejection
+        //     regardless of balance or threshold state.
+        if let Err(err_code) = error_recovery::check_and_allow_with_thresholds(&env) {
+            reentrancy_guard::clear_entered(&env);
+            if err_code == error_recovery::ERR_CIRCUIT_OPEN {
+                panic!("Circuit breaker is OPEN");
+            } else {
+                panic!("Operation rejected by circuit breaker");
+            }
+        }
+
         // 4. Authorization
         Self::authorize_release_actor(&env, &program_data, caller.as_ref());
 
@@ -3824,7 +3846,7 @@ impl ProgramEscrowContract {
 
         // 6. Business logic: sufficient balance
         // Deterministic error ordering: spend threshold check runs before
-        // balance/circuit checks, so clients observe stable failures.
+        // balance checks, so clients observe stable failures.
         if Self::enforce_spend_threshold(&env, &program_data.program_id, total_payout).is_err() {
             bail!(BatchPayoutError::SpendLimitExceeded);
         }
@@ -3987,6 +4009,8 @@ impl ProgramEscrowContract {
         // 1b. Idempotency check
         // 2. Contract initialized
         // 3. Paused (operational state)
+        // 3b. Dispute guard
+        // 3c. Circuit breaker — before all business logic for deterministic rejection
         // 4. Authorization
         // 6. Business logic (sufficient balance)
         // 7. Circuit breaker check
@@ -4026,6 +4050,18 @@ impl ProgramEscrowContract {
             panic!("Payout blocked: dispute open");
         }
 
+        // 3c. Circuit breaker check — runs before all business logic so that
+        //     an open circuit produces a deterministic, stable rejection
+        //     regardless of balance or threshold state.
+        if let Err(err_code) = error_recovery::check_and_allow_with_thresholds(&env) {
+            reentrancy_guard::clear_entered(&env);
+            if err_code == error_recovery::ERR_CIRCUIT_OPEN {
+                panic!("Circuit breaker is OPEN");
+            } else {
+                panic!("Operation rejected by circuit breaker");
+            }
+        }
+
         // 4. Authorization
         Self::authorize_release_actor(&env, &program_data, caller.as_ref());
 
@@ -4062,7 +4098,7 @@ impl ProgramEscrowContract {
 
         // 6. Business logic: sufficient balance
         // Deterministic error ordering: spend threshold check runs before
-        // balance/circuit checks, so clients observe stable failures.
+        // balance checks, so clients observe stable failures.
         if Self::enforce_spend_threshold(&env, &program_data.program_id, amount).is_err() {
             reentrancy_guard::clear_entered(&env);
             panic!("Spend threshold exceeded");
@@ -4074,16 +4110,6 @@ impl ProgramEscrowContract {
         if amount > program_data.remaining_balance {
             reentrancy_guard::clear_entered(&env);
             panic!("Insufficient balance");
-        }
-
-        // 7. Circuit breaker check
-        if let Err(err_code) = error_recovery::check_and_allow_with_thresholds(&env) {
-            reentrancy_guard::clear_entered(&env);
-            if err_code == error_recovery::ERR_CIRCUIT_OPEN {
-                panic!("Circuit breaker is OPEN");
-            } else {
-                panic!("Operation rejected by circuit breaker");
-            }
         }
 
         let contract_address = env.current_contract_address();

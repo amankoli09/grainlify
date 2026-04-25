@@ -3,7 +3,7 @@
   "contract_name": "ProgramEscrowContract",
   "contract_purpose": "Handles hackathon and program prize pools with batch payouts, dependency management, circuit breaker protection, and comprehensive monitoring",
   "version": {
-    "current": "2.6.0",
+    "current": "2.7.0",
     "schema": "1.0.0",
     "history": [
       {
@@ -79,6 +79,19 @@
           "Added ContractError::TokenNotAllowed (code 1100), TokenAlreadyAllowed (1101), TokenNotInAllowlist (1102) to canonical error enum",
           "Deterministic error ordering preserved: allowlist check runs before any state mutation in init_program",
           "Added 22 targeted tests in test_token_allowlist.rs covering all branches, event fields, admin guards, and edge cases"
+        ]
+      },
+      {
+        "version": "2.7.0",
+        "release_date": "2026-04-24",
+        "changes": [
+          "Circuit breaker enforcement moved to step 3c — before authorization and all business logic — in both single_payout_internal and batch_payout_internal",
+          "Deterministic rejection: an open circuit now blocks payouts before balance, spend-threshold, or spending-window checks, producing stable client-observable failures",
+          "Added get_circuit_breaker_status view entrypoint returning CircuitBreakerStatus snapshot from persistent storage",
+          "Upgrade-safe: get_circuit_breaker_status returns safe defaults for legacy deployments with no circuit breaker state",
+          "Added ContractError::CircuitBreakerOpen (code 800) as the canonical error for circuit-open rejections",
+          "Removed duplicate step-7 circuit breaker block from batch_payout_internal",
+          "Updated validation-precedence comments in both payout internals to reflect new ordering"
         ]
       },
       {
@@ -1094,6 +1107,18 @@
         "returns": {
           "type": "Option<Address>",
           "description": "Circuit breaker admin if set"
+        },
+        "authorization": "any",
+        "pausable": false,
+        "gas_estimate": "low"
+      },
+      {
+        "name": "get_circuit_breaker_status",
+        "description": "Return a full snapshot of the circuit breaker state. Returns safe defaults for legacy deployments that have never written circuit breaker state.",
+        "parameters": [],
+        "returns": {
+          "type": "CircuitBreakerStatus",
+          "description": "Snapshot of state, failure_count, success_count, opened_at, and configured thresholds"
         },
         "authorization": "any",
         "pausable": false,
