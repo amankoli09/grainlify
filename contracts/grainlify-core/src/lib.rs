@@ -24,11 +24,15 @@ use soroban_sdk::{
 use soroban_sdk::testutils::Address as _;
 pub mod asset;
 pub mod commit_reveal;
+pub mod error_registry;
 pub mod errors;
 mod governance;
 pub mod nonce;
 pub mod pseudo_randomness;
 pub mod strict_mode;
+
+#[cfg(test)]
+mod test_error_registry;
 
 pub use governance::{GovernanceConfig, Proposal, ProposalStatus, Vote, VoteType, VotingScheme};
 
@@ -64,7 +68,12 @@ pub enum ContractError {
 #[cfg(feature = "contract")]
 const VERSION: u32 = 2;
 pub const STORAGE_SCHEMA_VERSION: u32 = 1;
+pub const LIVENESS_SCHEMA_VERSION: u32 = 1;
 const CONFIG_SNAPSHOT_LIMIT: u32 = 20;
+
+/// Maximum number of deployed contracts that can be registered.
+/// Prevents unbounded storage growth and ensures predictable gas costs.
+const MAX_DEPLOYED_CONTRACTS: u32 = 200;
 
 /// Default timelock delay for upgrade execution (24 hours in seconds)
 const DEFAULT_TIMELOCK_DELAY: u64 = 86_400;
@@ -90,7 +99,90 @@ pub struct UpgradeEvent {
     pub timestamp: u64,
 }
 
+/// Emitted when read-only mode is toggled.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReadOnlyModeEvent {
+    pub enabled: bool,
+    pub admin: Address,
+    pub timestamp: u64,
+}
 
+/// Emitted during contract initialization to record build and deployment information.
+///
+/// This event provides crucial metadata for auditing and monitoring contract deployments:
+/// - Allows indexers and monitoring systems to track contract initialization events
+/// - Records the initial admin address for access control auditing
+/// - Captures the exact ledger timestamp for event sequencing
+/// - Enables verification of deployment order and timing across networks
+///
+/// # Security Considerations
+/// - Event is emitted during `init_admin` which requires the admin's authorization
+/// - Provides transparent audit trail for deployment activities
+/// - Should be indexed by off-chain monitoring systems for initialization verification
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BuildInfoEvent {
+    /// The admin address that authorized contract initialization
+    pub admin: Address,
+    /// Initial contract version set during initialization
+    pub version: u32,
+    /// Ledger timestamp when the contract was initialized
+    pub timestamp: u64,
+}
+
+/// Point-in-time snapshot of core configuration.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CoreConfigSnapshot {
+    pub id: u64,
+    pub timestamp: u64,
+    pub admin: Option<Address>,
+    pub version: u32,
+    pub previous_version: Option<u32>,
+    pub multisig_threshold: u32,
+    pub multisig_signers: Vec<Address>,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SnapshotDiff {
+    pub from_id: u64,
+    pub to_id: u64,
+    pub admin_changed: bool,
+    pub version_changed: bool,
+    pub previous_version_changed: bool,
+    pub multisig_threshold_changed: bool,
+    pub multisig_signers_changed: bool,
+    pub from_version: u32,
+    pub to_version: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RollbackInfo {
+    pub current_version: u32,
+    pub previous_version: u32,
+    pub rollback_available: bool,
+    pub has_migration: bool,
+    pub migration_from_version: u32,
+    pub migration_to_version: u32,
+    pub migration_timestamp: u64,
+    pub snapshot_count: u32,
+    pub has_snapshot: bool,
+    pub latest_snapshot_id: u64,
+    pub latest_snapshot_version: u32,
+}
+
+/// Persisted migration result for audit and idempotency.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MigrationState {
+    pub from_version: u32,
+    pub to_version: u32,
+    pub migrated_at: u64,
+    pub migration_hash: BytesN<32>,
+}
 
 /// Canonical read model for a multisig upgrade proposal.
 ///
@@ -164,131 +256,67 @@ pub struct PendingAdminRestore {
     pub expires_at: u64,
 }
 
-// ============================================================================
-// Migration Framework Types  [Issue #1087]
-// ============================================================================
-
-/// Persisted record of a completed migration.
-///
-/// Stored at `DataKey::MigrationState` after every successful `migrate()` call.
-/// The idempotency guard in `migrate()` reads this to skip already-applied
-/// migrations.
+/// Kind of contract deployed in the Grainlify ecosystem.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct MigrationState {
-    /// Contract version before this migration ran.
-    pub from_version: u32,
-    /// Contract version after this migration ran.
-    pub to_version: u32,
-    /// Ledger timestamp when the migration completed.
-    pub migrated_at: u64,
-    /// SHA-256 hash supplied by the admin — stored for off-chain audit.
-    pub migration_hash: BytesN<32>,
+pub enum ContractKind {
+    BountyEscrow,
+    ProgramEscrow,
+    SorobanEscrow,
+    GrainlifyCore,
+    ViewFacade,
+    Other,
 }
 
-/// On-chain event emitted by every `migrate()` call (success or failure).
-///
-/// Topic: `(symbol_short!("migrate"), symbol_short!("done"))` on success,
-///        `(symbol_short!("migrate"), symbol_short!("failed"))` on failure.
-///
-/// Off-chain monitors can subscribe to these topics to detect and alert on
-/// failed migration attempts before the transaction reverts.
+/// A single entry in the deployed-contract registry.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct MigrationEvent {
-    pub from_version: u32,
-    pub to_version: u32,
-    pub timestamp: u64,
-    pub migration_hash: BytesN<32>,
-    /// `true` when migration completed successfully.
-    pub success: bool,
-    /// Human-readable error description on failure; `None` on success.
-    pub error_message: Option<String>,
-}
-
-/// On-chain event emitted by `commit_migration()`.
-///
-/// Topic: `(symbol_short!("migrate"), symbol_short!("commit"))`.
-/// Allows off-chain tooling to verify a commitment is live before calling
-/// `migrate()`.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct MigrationCommittedEvent {
-    pub target_version: u32,
-    pub hash: BytesN<32>,
-    pub committed_at: u64,
-    /// `0` means no expiry.
-    pub expires_at: u64,
-    pub admin: Address,
-}
-
-// ============================================================================
-// Config Snapshot Types
-// ============================================================================
-
-/// Point-in-time snapshot of the contract's core configuration.
-///
-/// Stored at `DataKey::ConfigSnapshot(id)` and used for recovery and audit.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CoreConfigSnapshot {
-    pub id: u64,
-    pub timestamp: u64,
-    pub admin: Option<Address>,
+pub struct DeployedContract {
+    /// On-chain address of the deployed contract.
+    pub address: Address,
+    /// Human-readable name of the contract (e.g. "bounty-escrow-v3").
+    pub name: String,
+    /// Role / type of the contract within the ecosystem.
+    pub kind: ContractKind,
+    /// Numeric version reported at registration time.
     pub version: u32,
-    pub previous_version: Option<u32>,
-    pub multisig_threshold: u32,
-    pub multisig_signers: Vec<Address>,
+    /// Ledger timestamp when the contract was registered.
+    pub deployed_at: u64,
 }
 
-/// Diff between two config snapshots returned by `compare_snapshots`.
+/// Liveness watchdog status — a single read-only view of the contract's
+/// operational health, pause state, and maintenance mode.
+///
+/// Returned by `liveness_watchdog()`. All fields are safe to read without auth.
+///
+/// # Fields
+/// * `paused`       — true when MultiSig pause is active (no payouts/upgrades)
+/// * `read_only`    — true when read-only mode is set (mutations blocked)
+/// * `healthy`      — true when monitoring invariants pass
+/// * `last_ping_ts` — ledger timestamp of the last `ping_watchdog` call (0 if never)
+/// * `version`      — current contract version number
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SnapshotDiff {
-    pub from_id: u64,
-    pub to_id: u64,
-    pub admin_changed: bool,
-    pub version_changed: bool,
-    pub previous_version_changed: bool,
-    pub multisig_threshold_changed: bool,
-    pub multisig_signers_changed: bool,
-    pub from_version: u32,
-    pub to_version: u32,
+pub struct WatchdogStatus {
+    pub paused: bool,
+    pub read_only: bool,
+    pub healthy: bool,
+    pub last_ping_ts: u64,
+    pub version: u32,
 }
 
-/// Summary of rollback-related state returned by `get_rollback_info`.
+/// Liveness snapshot returned by `liveness_watchdog`.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RollbackInfo {
-    pub current_version: u32,
-    pub previous_version: u32,
-    pub rollback_available: bool,
-    pub has_migration: bool,
-    pub migration_from_version: u32,
-    pub migration_to_version: u32,
-    pub migration_timestamp: u64,
-    pub snapshot_count: u32,
-    pub has_snapshot: bool,
-    pub latest_snapshot_id: u64,
-    pub latest_snapshot_version: u32,
-}
-
-/// Event emitted when read-only mode is toggled.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ReadOnlyModeEvent {
-    pub enabled: bool,
-    pub admin: Address,
+pub struct LivenessStatus {
+    pub is_paused: bool,
+    pub is_read_only: bool,
+    pub is_operational: bool,
+    pub version: u32,
+    pub admin_set: bool,
     pub timestamp: u64,
+    pub schema_version: u32,
 }
-
-/// Helper: returns `true` when the contract has been initialized.
-fn contract_is_initialized(env: &Env) -> bool {
-    env.storage().instance().has(&DataKey::Admin)
-}
-
-
-
 
 /// Storage keys for contract data.
 ///
@@ -406,6 +434,11 @@ enum DataKey {
     UpgradeTimelock(u64),
     /// [FIX-C02] Pending admin restore awaiting new-admin confirmation
     PendingAdminRestore,
+    /// Upgrade-safe schema version marker for liveness watchdog storage.
+    /// Written on init_admin; increment when LivenessStatus layout changes.
+    LivenessSchemaVersion,
+    /// Timestamp of the last successful ping_watchdog call.
+    WatchdogLastPing,
 }
 
 // ============================================================================
@@ -733,653 +766,8 @@ mod test_version_helpers;
 #[cfg(test)]
 mod test_strict_mode;
 #[cfg(test)]
-mod migration_hook_tests;
-#[cfg(test)]
-mod test_migration_replay;
-
+mod test_contract_registry;
 // ==================== END MONITORING MODULE ====================
-
-// ==================== MANIFEST CONFORMANCE HARNESS ====================
-
-/// # Manifest Conformance Harness
-///
-/// This module implements a comprehensive validation system that ensures the Grainlify contract's
-/// runtime behavior matches its declared manifest specification. The harness validates:
-///
-/// ## Validation Scope
-/// - **Contract Initialization**: Ensures proper setup and configuration
-/// - **Entrypoint Availability**: Validates all declared functions exist and are callable
-/// - **Configuration Parameters**: Checks default values and constraints
-/// - **Storage Keys**: Verifies storage layout matches specification
-/// - **Security Features**: Validates monitoring, invariants, and access controls
-/// - **Access Control**: Ensures authorization mechanisms work correctly
-/// - **Error Handling**: Tests error scenarios and recovery mechanisms
-/// - **Event Emission**: Validates event patterns and data structures
-/// - **Gas Considerations**: Checks performance and cost characteristics
-/// - **Upgrade Safety**: Validates version management and migration safety
-///
-/// ## Security Considerations
-/// - **Runtime Validation**: All checks are performed at runtime for accuracy
-/// - **Comprehensive Coverage**: Validates both basic conformance and edge cases
-/// - **Error Reporting**: Provides detailed error messages for debugging
-/// - **Invariant Checking**: Ensures contract state remains consistent
-/// - **Authorization Validation**: Verifies access controls are properly implemented
-///
-/// ## Usage
-/// ```rust
-/// // Basic conformance check
-/// let result = contract.validate_manifest_conformance(env);
-/// assert!(result.is_conformant);
-///
-/// // Deep validation with edge cases
-/// let deep_result = contract.validate_deep_conformance(env);
-/// assert!(deep_result.is_conformant);
-/// ```
-///
-/// ## Test Coverage
-/// The harness includes comprehensive tests covering:
-/// - ✅ Uninitialized contract validation
-/// - ✅ Initialized contract validation (single admin and multisig)
-/// - ✅ Migration state validation
-/// - ✅ Error reporting accuracy
-/// - ✅ Warning generation
-/// - ✅ Edge cases and security scenarios
-/// - ✅ Performance and gas considerations
-///
-/// ## Performance Notes
-/// - Basic validation: Low gas cost, suitable for frequent checks
-/// - Deep validation: Higher gas cost, recommended for audits and deployment
-/// - All validations are read-only and cannot modify contract state
-///
-/// ## Integration
-/// The harness integrates with:
-/// - Contract monitoring system for runtime health checks
-/// - Test suite for continuous validation
-/// - Deployment scripts for pre-deployment verification
-/// - Audit tools for compliance checking
-///
-/// ## Error Types
-/// - **Critical Errors**: Contract behavior doesn't match specification
-/// - **Warnings**: Potential issues or incomplete runtime validation
-/// - **Info Messages**: Successful validation confirmations
-///
-#[cfg(all(any(test, feature = "testutils"), feature = "wasm_tests"))]
-mod manifest_conformance {
-    use super::*;
-    use soroban_sdk::{contracttype, symbol_short, Address, BytesN, Env, String, Symbol, Vec};
-
-    /// Result of a manifest conformance check.
-    #[contracttype]
-    #[derive(Clone, Debug, Eq, PartialEq)]
-    pub struct ConformanceResult {
-        /// Overall conformance status
-        pub is_conformant: bool,
-        /// Number of checks performed
-        pub total_checks: u32,
-        /// Number of failed checks
-        pub failed_checks: u32,
-        /// List of validation errors
-        pub errors: Vec<String>,
-        /// List of warnings (non-blocking issues)
-        pub warnings: Vec<String>,
-    }
-
-    /// Detailed validation report for a specific manifest section.
-    #[contracttype]
-    #[derive(Clone, Debug, Eq, PartialEq)]
-    pub struct ValidationReport {
-        /// Section name being validated
-        pub section: String,
-        /// Whether this section is conformant
-        pub is_valid: bool,
-        /// Number of checks in this section
-        pub checks_performed: u32,
-        /// Number of failures in this section
-        pub failures: u32,
-        /// Specific validation messages
-        pub messages: Vec<String>,
-    }
-
-    /// Manifest conformance harness implementation.
-    pub struct ManifestHarness;
-
-    impl ManifestHarness {
-        /// Performs comprehensive manifest conformance validation.
-        ///
-        /// This function validates that the contract's current state and behavior
-        /// conform to the manifest specification. It checks:
-        /// - Contract initialization status
-        /// - Entrypoint availability
-        /// - Configuration parameters
-        /// - Storage keys
-        /// - Security features
-        /// - Access control
-        ///
-        /// # Returns
-        /// Comprehensive conformance result with detailed error reporting.
-        pub fn validate_conformance(env: &Env) -> ConformanceResult {
-            let mut errors = Vec::new(env);
-            let mut warnings = Vec::new(env);
-            let mut total_checks = 0u32;
-            let mut failed_checks = 0u32;
-
-            // 1. Validate contract initialization
-            total_checks += 1;
-            if !Self::validate_initialization(env) {
-                failed_checks += 1;
-                errors.push_back(String::from_str(env, "Contract initialization validation failed"));
-            }
-
-            // 2. Validate entrypoints
-            let entrypoint_result = Self::validate_entrypoints(env);
-            total_checks += entrypoint_result.checks_performed;
-            failed_checks += entrypoint_result.failures;
-            if !entrypoint_result.is_valid {
-                errors.push_back(String::from_str(env, "Entrypoint validation failed"));
-            }
-            for msg in entrypoint_result.messages {
-                if msg.starts_with("ERROR:") {
-                    errors.push_back(msg);
-                } else {
-                    warnings.push_back(msg);
-                }
-            }
-
-            // 3. Validate configuration
-            let config_result = Self::validate_configuration(env);
-            total_checks += config_result.checks_performed;
-            failed_checks += config_result.failures;
-            if !config_result.is_valid {
-                errors.push_back(String::from_str(env, "Configuration validation failed"));
-            }
-            for msg in config_result.messages {
-                if msg.starts_with("ERROR:") {
-                    errors.push_back(msg);
-                } else {
-                    warnings.push_back(msg);
-                }
-            }
-
-            // 4. Validate storage keys
-            let storage_result = Self::validate_storage_keys(env);
-            total_checks += storage_result.checks_performed;
-            failed_checks += storage_result.failures;
-            if !storage_result.is_valid {
-                errors.push_back(String::from_str(env, "Storage key validation failed"));
-            }
-            for msg in storage_result.messages {
-                if msg.starts_with("ERROR:") {
-                    errors.push_back(msg);
-                } else {
-                    warnings.push_back(msg);
-                }
-            }
-
-            // 5. Validate security features
-            let security_result = Self::validate_security_features(env);
-            total_checks += security_result.checks_performed;
-            failed_checks += security_result.failures;
-            if !security_result.is_valid {
-                errors.push_back(String::from_str(env, "Security features validation failed"));
-            }
-            for msg in security_result.messages {
-                if msg.starts_with("ERROR:") {
-                    errors.push_back(msg);
-                } else {
-                    warnings.push_back(msg);
-                }
-            }
-
-            // 6. Validate access control
-            let access_result = Self::validate_access_control(env);
-            total_checks += access_result.checks_performed;
-            failed_checks += access_result.failures;
-            if !access_result.is_valid {
-                errors.push_back(String::from_str(env, "Access control validation failed"));
-            }
-            for msg in access_result.messages {
-                if msg.starts_with("ERROR:") {
-                    errors.push_back(msg);
-                } else {
-                    warnings.push_back(msg);
-                }
-            }
-
-            ConformanceResult {
-                is_conformant: failed_checks == 0,
-                total_checks,
-                failed_checks,
-                errors,
-                warnings,
-            }
-        }
-
-        /// Validates that the contract has been properly initialized.
-        fn validate_initialization(env: &Env) -> bool {
-            // Check if at least one initialization method has been called
-            contract_is_initialized(env)
-        }
-
-        /// Validates entrypoint availability and behavior.
-        fn validate_entrypoints(env: &Env) -> ValidationReport {
-            let mut messages = Vec::new(env);
-            let mut checks = 0u32;
-            let mut failures = 0u32;
-
-            // Check public entrypoints from manifest
-            let public_entrypoints = [
-                "upgrade", "set_version", "migrate", "propose_upgrade",
-                "approve_upgrade", "execute_upgrade"
-            ];
-
-            for entrypoint in public_entrypoints.iter() {
-                checks += 1;
-                // Note: We can't directly test entrypoint existence at runtime
-                // but we can validate that the contract responds to known patterns
-                if Self::validate_entrypoint_signature(env, *entrypoint) {
-                    messages.push_back(String::from_str(env, &format!("INFO: Public entrypoint '{}' signature valid", entrypoint)));
-                } else {
-                    failures += 1;
-                    messages.push_back(String::from_str(env, &format!("ERROR: Public entrypoint '{}' signature invalid", entrypoint)));
-                }
-            }
-
-            // Check view entrypoints
-            let view_entrypoints = [
-                "get_version", "get_version_semver_string", "get_version_numeric_encoded",
-                "require_min_version", "get_migration_state", "get_previous_version",
-                "health_check", "get_analytics", "get_state_snapshot", "get_performance_stats"
-            ];
-
-            for entrypoint in view_entrypoints.iter() {
-                checks += 1;
-                if Self::validate_entrypoint_signature(env, *entrypoint) {
-                    messages.push_back(String::from_str(env, &format!("INFO: View entrypoint '{}' signature valid", entrypoint)));
-                } else {
-                    failures += 1;
-                    messages.push_back(String::from_str(env, &format!("ERROR: View entrypoint '{}' signature invalid", entrypoint)));
-                }
-            }
-
-            ValidationReport {
-                section: String::from_str(env, "entrypoints"),
-                is_valid: failures == 0,
-                checks_performed: checks,
-                failures,
-                messages,
-            }
-        }
-
-        /// Validates configuration parameters and their defaults.
-        fn validate_configuration(env: &Env) -> ValidationReport {
-            let mut messages = Vec::new(env);
-            let mut checks = 0u32;
-            let mut failures = 0u32;
-
-            // Check VERSION constant
-            checks += 1;
-            if VERSION >= 1 {
-                messages.push_back(String::from_str(env, "INFO: VERSION constant is valid (>= 1)"));
-            } else {
-                failures += 1;
-                messages.push_back(String::from_str(env, "ERROR: VERSION constant is invalid (< 1)"));
-            }
-
-            // Check storage schema version
-            checks += 1;
-            if STORAGE_SCHEMA_VERSION >= 1 {
-                messages.push_back(String::from_str(env, "INFO: STORAGE_SCHEMA_VERSION constant is valid (>= 1)"));
-            } else {
-                failures += 1;
-                messages.push_back(String::from_str(env, "ERROR: STORAGE_SCHEMA_VERSION constant is invalid (< 1)"));
-            }
-
-            // Check timelock delay default
-            checks += 1;
-            if DEFAULT_TIMELOCK_DELAY >= 3600 { // At least 1 hour
-                messages.push_back(String::from_str(env, "INFO: DEFAULT_TIMELOCK_DELAY is reasonable (>= 1 hour)"));
-            } else {
-                failures += 1;
-                messages.push_back(String::from_str(env, "ERROR: DEFAULT_TIMELOCK_DELAY is too short (< 1 hour)"));
-            }
-
-            ValidationReport {
-                section: String::from_str(env, "configuration"),
-                is_valid: failures == 0,
-                checks_performed: checks,
-                failures,
-                messages,
-            }
-        }
-
-        /// Validates storage key usage and consistency.
-        fn validate_storage_keys(env: &Env) -> ValidationReport {
-            let mut messages = Vec::new(env);
-            let mut checks = 0u32;
-            let mut failures = 0u32;
-
-            // Check critical storage keys exist when initialized
-            if contract_is_initialized(env) {
-                checks += 1;
-                if env.storage().instance().has(&DataKey::Version) {
-                    messages.push_back(String::from_str(env, "INFO: Version storage key exists"));
-                } else {
-                    failures += 1;
-                    messages.push_back(String::from_str(env, "ERROR: Version storage key missing"));
-                }
-
-                // Check admin or multisig config exists
-                checks += 1;
-                let has_admin = env.storage().instance().has(&DataKey::Admin);
-                let has_multisig = MultiSig::get_config_opt(env).is_some();
-
-                if has_admin || has_multisig {
-                    messages.push_back(String::from_str(env, "INFO: Admin or multisig configuration exists"));
-                } else {
-                    failures += 1;
-                    messages.push_back(String::from_str(env, "ERROR: Neither admin nor multisig configuration found"));
-                }
-            }
-
-            ValidationReport {
-                section: String::from_str(env, "storage_keys"),
-                is_valid: failures == 0,
-                checks_performed: checks,
-                failures,
-                messages,
-            }
-        }
-
-        /// Validates security features implementation.
-        fn validate_security_features(env: &Env) -> ValidationReport {
-            let mut messages = Vec::new(env);
-            let mut checks = 0u32;
-            let mut failures = 0u32;
-
-            // Check monitoring is functional
-            checks += 1;
-            let health = monitoring::health_check(env);
-            if health.is_healthy {
-                messages.push_back(String::from_str(env, "INFO: Contract health check passes"));
-            } else {
-                failures += 1;
-                messages.push_back(String::from_str(env, "ERROR: Contract health check fails"));
-            }
-
-            // Check invariants
-            checks += 1;
-            if monitoring::verify_invariants(env) {
-                messages.push_back(String::from_str(env, "INFO: Contract invariants verified"));
-            } else {
-                failures += 1;
-                messages.push_back(String::from_str(env, "ERROR: Contract invariants violated"));
-            }
-
-            // Check strict mode availability
-            checks += 1;
-            #[cfg(feature = "strict-mode")]
-            {
-                messages.push_back(String::from_str(env, "INFO: Strict mode feature is enabled"));
-            }
-            #[cfg(not(feature = "strict-mode"))]
-            {
-                messages.push_back(String::from_str(env, "WARNING: Strict mode feature is not enabled"));
-            }
-
-            ValidationReport {
-                section: String::from_str(env, "security_features"),
-                is_valid: failures == 0,
-                checks_performed: checks,
-                failures,
-                messages,
-            }
-        }
-
-        /// Validates access control mechanisms.
-        fn validate_access_control(env: &Env) -> ValidationReport {
-            let mut messages = Vec::new(env);
-            let mut checks = 0u32;
-            let mut failures = 0u32;
-
-            // Check that admin functions require proper authorization
-            checks += 1;
-            if contract_is_initialized(env) {
-                // We can't directly test authorization at runtime without triggering it,
-                // but we can validate that the authorization patterns are in place
-                messages.push_back(String::from_str(env, "INFO: Authorization patterns are implemented (runtime validation requires auth attempts)"));
-            } else {
-                messages.push_back(String::from_str(env, "WARNING: Contract not initialized - cannot validate authorization"));
-            }
-
-            // Check multisig configuration if present
-            checks += 1;
-            if let Some(config) = MultiSig::get_config_opt(env) {
-                if config.threshold >= 1 && config.signers.len() >= config.threshold as u32 {
-                    messages.push_back(String::from_str(env, "INFO: Multisig configuration is valid"));
-                } else {
-                    failures += 1;
-                    messages.push_back(String::from_str(env, "ERROR: Multisig configuration is invalid (threshold/signers mismatch)"));
-                }
-            } else {
-                messages.push_back(String::from_str(env, "INFO: Multisig not configured (single admin mode)"));
-            }
-
-            ValidationReport {
-                section: String::from_str(env, "access_control"),
-                is_valid: failures == 0,
-                checks_performed: checks,
-                failures,
-                messages,
-            }
-        }
-
-        /// Validates entrypoint signature (basic pattern matching).
-        fn validate_entrypoint_signature(_env: &Env, entrypoint: &str) -> bool {
-            // This is a simplified validation - in practice, we'd need more sophisticated
-            // runtime reflection or compile-time validation
-            // For now, we validate that the entrypoint name follows expected patterns
-            match entrypoint {
-                "upgrade" | "set_version" | "migrate" | "propose_upgrade" |
-                "approve_upgrade" | "execute_upgrade" | "get_version" |
-                "get_version_semver_string" | "get_version_numeric_encoded" |
-                "require_min_version" | "get_migration_state" | "get_previous_version" |
-                "health_check" | "get_analytics" | "get_state_snapshot" |
-                "get_performance_stats" | "init" | "init_admin" | "init_governance" => true,
-                _ => false,
-            }
-        }
-
-        /// Performs deep validation of all contract behaviors.
-        ///
-        /// This includes edge cases, error conditions, and security validations
-        /// that go beyond basic conformance checking.
-        pub fn validate_deep_conformance(env: &Env) -> ConformanceResult {
-            let mut errors = Vec::new(env);
-            let mut warnings = Vec::new(env);
-            let mut total_checks = 0u32;
-            let mut failed_checks = 0u32;
-
-            // Test error handling scenarios
-            let error_result = Self::validate_error_handling(env);
-            total_checks += error_result.checks_performed;
-            failed_checks += error_result.failures;
-            for msg in error_result.messages {
-                if msg.starts_with("ERROR:") {
-                    errors.push_back(msg);
-                } else {
-                    warnings.push_back(msg);
-                }
-            }
-
-            // Test gas considerations
-            let gas_result = Self::validate_gas_considerations(env);
-            total_checks += gas_result.checks_performed;
-            failed_checks += gas_result.failures;
-            for msg in gas_result.messages {
-                if msg.starts_with("ERROR:") {
-                    errors.push_back(msg);
-                } else {
-                    warnings.push_back(msg);
-                }
-            }
-
-            // Test event emission
-            let event_result = Self::validate_event_emission(env);
-            total_checks += event_result.checks_performed;
-            failed_checks += event_result.failures;
-            for msg in event_result.messages {
-                if msg.starts_with("ERROR:") {
-                    errors.push_back(msg);
-                } else {
-                    warnings.push_back(msg);
-                }
-            }
-
-            // Test upgrade safety
-            let upgrade_result = Self::validate_upgrade_safety(env);
-            total_checks += upgrade_result.checks_performed;
-            failed_checks += upgrade_result.failures;
-            for msg in upgrade_result.messages {
-                if msg.starts_with("ERROR:") {
-                    errors.push_back(msg);
-                } else {
-                    warnings.push_back(msg);
-                }
-            }
-
-            ConformanceResult {
-                is_conformant: failed_checks == 0,
-                total_checks,
-                failed_checks,
-                errors,
-                warnings,
-            }
-        }
-
-        /// Validates error handling scenarios.
-        fn validate_error_handling(env: &Env) -> ValidationReport {
-            let mut messages = Vec::new(env);
-            let mut checks = 0u32;
-            let mut failures = 0u32;
-
-            // Check that error constants are properly defined
-            checks += 1;
-            // ContractError enum should have expected variants
-            messages.push_back(String::from_str(env, "INFO: ContractError enum is defined with expected variants"));
-
-            // Check monitoring error tracking
-            checks += 1;
-            let analytics = monitoring::get_analytics(env);
-            if analytics.error_count <= analytics.operation_count {
-                messages.push_back(String::from_str(env, "INFO: Error count is consistent with operation count"));
-            } else {
-                failures += 1;
-                messages.push_back(String::from_str(env, "ERROR: Error count exceeds operation count"));
-            }
-
-            ValidationReport {
-                section: String::from_str(env, "error_handling"),
-                is_valid: failures == 0,
-                checks_performed: checks,
-                failures,
-                messages,
-            }
-        }
-
-        /// Validates gas considerations (basic checks).
-        fn validate_gas_considerations(env: &Env) -> ValidationReport {
-            let mut messages = Vec::new(env);
-            let mut checks = 0u32;
-            let mut failures = 0u32;
-
-            // Check that performance monitoring is active
-            checks += 1;
-            let stats = monitoring::get_performance_stats(env, symbol_short!("init"));
-            if stats.call_count >= 0 { // Always true for u64, but checks monitoring is working
-                messages.push_back(String::from_str(env, "INFO: Performance monitoring is functional"));
-            } else {
-                failures += 1;
-                messages.push_back(String::from_str(env, "ERROR: Performance monitoring is not functional"));
-            }
-
-            ValidationReport {
-                section: String::from_str(env, "gas_considerations"),
-                is_valid: failures == 0,
-                checks_performed: checks,
-                failures,
-                messages,
-            }
-        }
-
-        /// Validates event emission patterns.
-        fn validate_event_emission(env: &Env) -> ValidationReport {
-            let mut messages = Vec::new(env);
-            let mut checks = 0u32;
-            let mut failures = 0u32;
-
-            // Check that events can be emitted (basic test)
-            checks += 1;
-            let initial_events = env.events().all().len();
-            // We can't easily trigger events without calling functions,
-            // but we can validate the event system is available
-            messages.push_back(String::from_str(env, "INFO: Event system is available"));
-
-            ValidationReport {
-                section: String::from_str(env, "event_emission"),
-                is_valid: failures == 0,
-                checks_performed: checks,
-                failures,
-                messages,
-            }
-        }
-
-        /// Validates upgrade safety mechanisms.
-        fn validate_upgrade_safety(env: &Env) -> ValidationReport {
-            let mut messages = Vec::new(env);
-            let mut checks = 0u32;
-            let mut failures = 0u32;
-
-            // Check version tracking
-            checks += 1;
-            if let Some(version) = env.storage().instance().get(&DataKey::Version) {
-                if version >= 1 {
-                    messages.push_back(String::from_str(env, "INFO: Version tracking is properly initialized"));
-                } else {
-                    failures += 1;
-                    messages.push_back(String::from_str(env, "ERROR: Version is invalid (< 1)"));
-                }
-            } else {
-                messages.push_back(String::from_str(env, "WARNING: Version not set (contract not initialized)"));
-            }
-
-            // Check previous version tracking
-            checks += 1;
-            if env.storage().instance().has(&DataKey::PreviousVersion) {
-                messages.push_back(String::from_str(env, "INFO: Previous version tracking is available"));
-            } else {
-                messages.push_back(String::from_str(env, "INFO: Previous version not set (normal for initial deployment)"));
-            }
-
-            // Check migration state tracking
-            checks += 1;
-            if env.storage().instance().has(&DataKey::MigrationState) {
-                messages.push_back(String::from_str(env, "INFO: Migration state tracking is available"));
-            } else {
-                messages.push_back(String::from_str(env, "INFO: Migration state not set (normal for initial deployment)"));
-            }
-
-            ValidationReport {
-                section: String::from_str(env, "upgrade_safety"),
-                is_valid: failures == 0,
-                checks_performed: checks,
-                failures,
-                messages,
-            }
-        }
-    }
-}
-
-// ==================== END MANIFEST CONFORMANCE HARNESS ====================
 
 #[cfg(feature = "contract")]
 #[contract]
@@ -1388,24 +776,28 @@ pub struct GrainlifyContract;
 #[cfg(feature = "contract")]
 #[contractimpl]
 impl GrainlifyContract {
-    /// Validates contract conformance against its manifest specification.
-    ///
-    /// This function performs comprehensive validation that the contract's runtime
-    /// behavior matches its declared manifest specification. It checks entrypoints,
-    /// configuration, storage keys, security features, and access control mechanisms.
-    ///
-    /// # Returns
-    /// * `ConformanceResult` - Detailed conformance validation results
-    ///
-    /// # Use Cases
-    /// - Pre-deployment validation
-    /// - Continuous integration testing
-    /// - Audit and compliance verification
-    /// - Runtime health monitoring
-    ///
-    /// # Security Note
-    /// This is a view function and requires no authorization. It can be called
-    /// by anyone to verify contract integrity.
+    /// One-time initialization: set the admin and initial version. Requires `admin` auth.
+    pub fn init_admin(env: Env, admin: Address) {
+        if env.storage().instance().has(&DataKey::Version) {
+            panic!("{}", ContractError::AlreadyInitialized as u32);
+        }
+        admin.require_auth();
+        env.storage().instance().set(&DataKey::Admin, &admin);
+        env.storage().instance().set(&DataKey::Version, &VERSION);
+        env.storage().instance().set(&DataKey::ReadOnlyMode, &false);
+        env.storage().instance().set(&DataKey::LivenessSchemaVersion, &LIVENESS_SCHEMA_VERSION);
+        
+        // Emit BuildInfo event for initialization tracking and auditing
+        env.events().publish(
+            (symbol_short!("init"), symbol_short!("build")),
+            BuildInfoEvent {
+                admin: admin.clone(),
+                version: VERSION,
+                timestamp: env.ledger().timestamp(),
+            },
+        );
+    }
+
     // ========================================================================
     // Timelock Execution (continued from propose/approve flow)
     // ========================================================================
@@ -1694,7 +1086,8 @@ impl GrainlifyContract {
         let index: Vec<u64> = env.storage().instance()
             .get(&DataKey::SnapshotIndex).unwrap_or(Vec::new(&env));
         let mut snapshots: Vec<CoreConfigSnapshot> = Vec::new(&env);
-        for snapshot_id in index.iter() {
+        for i in 0..index.len() {
+            let snapshot_id = index.get(i).unwrap();
             if let Some(snapshot) = env.storage().instance()
                 .get::<DataKey, CoreConfigSnapshot>(&DataKey::ConfigSnapshot(snapshot_id))
             {
@@ -1976,8 +1369,91 @@ impl GrainlifyContract {
         MultiSig::is_contract_paused(&env)
     }
 
+    /// Unified liveness watchdog view — no auth required, never panics.
+    ///
+    /// Returns a `LivenessStatus` snapshot combining pause state, read-only
+    /// mode, monitoring health, last-ping timestamp, version, and admin
+    /// presence.  Designed for polling by monitoring agents, circuit breakers,
+    /// and dashboards.
+    ///
+    /// # Upgrade Safety
+    /// `schema_version` reflects `LivenessSchemaVersion` written at `init_admin`.
+    /// Returns `0` on legacy deployments where the marker was never written.
+    pub fn liveness_watchdog(env: Env) -> LivenessStatus {
+        let is_paused = MultiSig::is_contract_paused(&env);
+        let is_read_only: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::ReadOnlyMode)
+            .unwrap_or(false);
+        let version: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::Version)
+            .unwrap_or(0);
+        let healthy = monitoring::check_invariants(&env).healthy;
+        let last_ping_ts: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::WatchdogLastPing)
+            .unwrap_or(0);
+        LivenessStatus {
+            is_paused,
+            is_read_only,
+            is_operational: !is_paused && !is_read_only,
+            admin_set: env.storage().instance().has(&DataKey::Admin),
+            schema_version: env
+                .storage()
+                .instance()
+                .get(&DataKey::LivenessSchemaVersion)
+                .unwrap_or(0),
+            timestamp: env.ledger().timestamp(),
+            paused: is_paused,
+            read_only: is_read_only,
+            healthy,
+            last_ping_ts,
+            version,
+        }
+    }
+
+    /// Returns the liveness schema version written at init.
+    /// Returns `0` on legacy deployments where the marker was never written.
+    pub fn get_liveness_schema_version(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::LivenessSchemaVersion)
+            .unwrap_or(0)
+    }
+
     pub fn can_execute(env: Env, proposal_id: u64) -> bool {
         MultiSig::can_execute(&env, proposal_id)
+    }
+
+    // ========================================================================
+    // Liveness Watchdog
+    // ========================================================================
+
+    /// Admin: record a liveness ping — updates `WatchdogLastPing` timestamp.
+    ///
+    /// Allows off-chain monitors to prove the contract is reachable and the
+    /// admin key is live. Blocked when read-only mode is active.
+    ///
+    /// # Authorization
+    /// Requires admin signature.
+    pub fn ping_watchdog(env: Env) {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic!("{}", ContractError::NotInitialized as u32));
+        admin.require_auth();
+        Self::require_not_read_only(&env);
+        let ts = env.ledger().timestamp();
+        env.storage().instance().set(&DataKey::WatchdogLastPing, &ts);
+        env.events().publish(
+            (symbol_short!("watchdog"), symbol_short!("ping")),
+            (admin, ts),
+        );
     }
 
     // ========================================================================
@@ -2001,408 +1477,181 @@ impl GrainlifyContract {
     }
 
     // ========================================================================
-    // Initialization
+    // Multisig Initialization
     // ========================================================================
 
-    /// Initialize the contract with a single admin address.
-    ///
-    /// Sets the admin, records the initial version, and emits an init event.
-    /// Can only be called once — subsequent calls panic with `AlreadyInitialized`.
-    ///
-    /// # Security
-    /// - Admin address is immutable after this call.
-    /// - Caller must authorize via `admin.require_auth()`.
-    pub fn init_admin(env: Env, admin: Address) {
-        if env.storage().instance().has(&DataKey::Admin) {
-            panic!("{}", ContractError::AlreadyInitialized as u32);
+    /// Initialize with multisig governance (alternative to init_admin).
+    /// Requires at least one signer and a valid threshold.
+    pub fn init(env: Env, signers: Vec<Address>, threshold: u32) {
+        if env.storage().instance().has(&DataKey::Version) {
+            panic!("Already initialized");
+        }
+        MultiSig::init(&env, signers, threshold);
+        env.storage().instance().set(&DataKey::Version, &VERSION);
+        env.storage().instance().set(&DataKey::ReadOnlyMode, &false);
+    }
+
+    /// Initialize with admin, chain_id, and network_id (network-aware init).
+    pub fn init_with_network(env: Env, admin: Address, chain_id: String, network_id: String) {
+        if env.storage().instance().has(&DataKey::Version) {
+            panic!("Already initialized");
         }
         admin.require_auth();
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::Version, &VERSION);
-        env.events().publish(
-            (symbol_short!("init"), symbol_short!("admin")),
-            (admin.clone(), VERSION, env.ledger().timestamp()),
-        );
-        monitoring::track_operation(&env, symbol_short!("init_adm"), admin, true);
+        env.storage().instance().set(&DataKey::ReadOnlyMode, &false);
+        env.storage().instance().set(&DataKey::ChainId, &chain_id);
+        env.storage().instance().set(&DataKey::NetworkId, &network_id);
     }
 
-    /// Initialize the contract with a multisig configuration.
-    ///
-    /// Sets up a multisig threshold + signer set instead of a single admin.
-    /// Can only be called once — subsequent calls panic with `AlreadyInitialized`.
-    pub fn init_governance(
-        env: Env,
-        admin: Address,
-        signers: Vec<Address>,
-        threshold: u32,
-    ) {
-        if env.storage().instance().has(&DataKey::Admin) {
-            panic!("{}", ContractError::AlreadyInitialized as u32);
+    /// Initialize with governance configuration.
+    pub fn init_governance(env: Env, admin: Address, config: GovernanceConfig) {
+        if env.storage().instance().has(&DataKey::Version) {
+            panic!("Already initialized");
         }
         admin.require_auth();
+        if config.quorum_percentage == 0 || config.quorum_percentage > 10000 {
+            panic!("Invalid quorum percentage");
+        }
+        if config.approval_threshold < 5000 || config.approval_threshold > 10000 {
+            panic!("Invalid approval threshold");
+        }
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::Version, &VERSION);
-        let config = multisig::MultiSigConfig { signers, threshold };
-        MultiSig::set_config(&env, config);
-        env.events().publish(
-            (symbol_short!("init"), symbol_short!("gov")),
-            (admin.clone(), VERSION, env.ledger().timestamp()),
-        );
-        monitoring::track_operation(&env, symbol_short!("init_gov"), admin, true);
+        env.storage().instance().set(&DataKey::ReadOnlyMode, &false);
+        env.storage().instance().set(&governance::GOVERNANCE_CONFIG, &config);
+        env.storage().instance().set(&governance::PROPOSAL_COUNT, &0u32);
     }
 
     // ========================================================================
-    // Multisig Upgrade Flow
+    // Multisig Upgrade Proposal Flow
     // ========================================================================
 
-    /// Propose a WASM upgrade via multisig.
-    ///
-    /// Any signer can propose; the proposal is stored and awaits threshold approvals.
-    /// Returns the stable `proposal_id` used for subsequent `approve_upgrade` /
-    /// `execute_upgrade` calls.
-    pub fn propose_upgrade(env: Env, proposer: Address, wasm_hash: BytesN<32>) -> u64 {
-        proposer.require_auth();
+    /// Propose a WASM upgrade via multisig. Returns the stable proposal ID.
+    /// `expiry` is a ledger timestamp after which the proposal cannot be approved
+    /// or executed (0 = no expiry).
+    pub fn propose_upgrade(env: Env, proposer: Address, wasm_hash: BytesN<32>, expiry: u64) -> u64 {
+        Self::require_not_paused(&env);
         Self::require_not_read_only(&env);
-
-        let proposal_id = MultiSig::propose(&env, proposer.clone(), 0 /* no expiry */);
-        env.storage()
-            .instance()
-            .set(&DataKey::UpgradeProposal(proposal_id), &wasm_hash);
-        env.storage()
-            .instance()
-            .set(&DataKey::UpgradeProposalProposer(proposal_id), &proposer);
-
-        env.events().publish(
-            (symbol_short!("upgrade"), symbol_short!("propose")),
-            (proposal_id, wasm_hash, proposer.clone(), env.ledger().timestamp()),
-        );
-        monitoring::track_operation(&env, symbol_short!("prop_upg"), proposer, true);
+        let proposal_id = MultiSig::propose(&env, proposer.clone(), expiry);
+        env.storage().instance().set(&DataKey::UpgradeProposal(proposal_id), &wasm_hash);
+        env.storage().instance().set(&DataKey::UpgradeProposalProposer(proposal_id), &proposer);
         proposal_id
     }
 
-    /// Approve a pending upgrade proposal.
-    ///
-    /// Once the multisig threshold is reached the timelock clock starts.
-    /// Emits `upgrade / approve` and, when threshold is met, `upgrade / timelock`.
-    pub fn approve_upgrade(env: Env, signer: Address, proposal_id: u64) {
-        signer.require_auth();
-        Self::require_not_read_only(&env);
-
-        MultiSig::approve(&env, proposal_id, signer.clone());
-
-        env.events().publish(
-            (symbol_short!("upgrade"), symbol_short!("approve")),
-            (proposal_id, signer.clone(), env.ledger().timestamp()),
-        );
-
-        // Start timelock when threshold is met
-        if MultiSig::can_execute(&env, proposal_id) {
-            env.storage()
-                .instance()
-                .set(&DataKey::UpgradeTimelock(proposal_id), &env.ledger().timestamp());
+    /// Approve a pending upgrade proposal. Starts the timelock when threshold is met.
+    pub fn approve_upgrade(env: Env, proposal_id: u64, signer: Address) {
+        Self::require_not_paused(&env);
+        MultiSig::approve(&env, proposal_id, signer);
+        // Start timelock if threshold is now met and not already started
+        if MultiSig::can_execute(&env, proposal_id)
+            && !env.storage().instance().has(&DataKey::UpgradeTimelock(proposal_id))
+        {
+            let now = env.ledger().timestamp();
+            env.storage().instance().set(&DataKey::UpgradeTimelock(proposal_id), &now);
             env.events().publish(
-                (symbol_short!("upgrade"), symbol_short!("timelock")),
-                (proposal_id, env.ledger().timestamp()),
+                (Symbol::new(&env, "timelock"), Symbol::new(&env, "started")),
+                (proposal_id, now),
             );
         }
-        monitoring::track_operation(&env, symbol_short!("appr_upg"), signer, true);
     }
 
-    /// Cancel a pending upgrade proposal (proposer or admin only).
-    pub fn cancel_upgrade(env: Env, caller: Address, proposal_id: u64) {
-        caller.require_auth();
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .unwrap_or_else(|| panic!("{}", ContractError::NotInitialized as u32));
-
-        let proposal = Self::load_upgrade_proposal(&env, proposal_id)
-            .unwrap_or_else(|| panic!("{}", ContractError::ProposalNotFound as u32));
-
-        let is_admin = caller == admin;
-        let is_proposer = proposal.proposer.as_ref().map(|p| *p == caller).unwrap_or(false);
-        if !is_admin && !is_proposer {
-            panic!("{}", ContractError::NotAdmin as u32);
-        }
-
-        MultiSig::cancel(&env, proposal_id, caller.clone());
+    /// Cancel a pending upgrade proposal. Any signer may cancel.
+    pub fn cancel_upgrade(env: Env, proposal_id: u64, canceller: Address) {
+        MultiSig::cancel(&env, proposal_id, canceller);
         env.storage().instance().remove(&DataKey::UpgradeTimelock(proposal_id));
-
-        env.events().publish(
-            (symbol_short!("upgrade"), symbol_short!("cancel")),
-            (proposal_id, caller.clone(), env.ledger().timestamp()),
-        );
-        monitoring::track_operation(&env, symbol_short!("cncl_upg"), caller, true);
     }
 
-    /// Return the full proposal record for a given proposal_id.
+    /// Return the upgrade proposal record for a given proposal ID, or None.
     pub fn get_upgrade_proposal(env: Env, proposal_id: u64) -> Option<UpgradeProposalRecord> {
         Self::load_upgrade_proposal(&env, proposal_id)
     }
 
     // ========================================================================
-    // Migration Framework + Replay Protection  [Issue #1087]
+    // Migration
     // ========================================================================
 
-    /// **Step 1 of 2 — Commit-reveal replay protection.**
-    ///
-    /// Admin pre-commits a `(target_version, hash)` pair on-chain.  The hash
-    /// must match the one supplied to `migrate()` in a later transaction.
-    /// This two-transaction pattern prevents front-running and ensures the
-    /// exact migration data was authorised by the admin before execution.
-    ///
-    /// # Replay Protection Flow
-    /// ```text
-    /// Tx A: admin calls commit_migration(3, sha256(migration_data))
-    ///       → MigrationCommitment stored on-chain
-    /// Tx B: admin calls migrate(3, sha256(migration_data))
-    ///       → commitment verified & consumed; migration executes
-    /// ```
-    ///
-    /// # Parameters
-    /// - `target_version` — version this commitment authorises
-    /// - `hash`           — SHA-256 of the migration payload (off-chain data)
-    /// - `expiry_seconds` — seconds until commitment expires; `0` = no expiry
-    ///
-    /// # Security
-    /// - Admin-only; requires `admin.require_auth()`.
-    /// - Commitment is keyed by `target_version` — only one live commitment
-    ///   per target version at a time.
-    /// - Expired commitments are rejected by `migrate()`.
-    pub fn commit_migration(
-        env: Env,
-        target_version: u32,
-        hash: BytesN<32>,
-        expiry_seconds: u64,
-    ) {
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
+    /// Pre-commit a migration hash for replay protection.
+    /// Must be called before `migrate()` with the same target_version and hash.
+    pub fn commit_migration(env: Env, target_version: u32, hash: BytesN<32>) {
+        let admin: Address = env.storage().instance().get(&DataKey::Admin)
             .unwrap_or_else(|| panic!("{}", ContractError::NotInitialized as u32));
         admin.require_auth();
         Self::require_not_read_only(&env);
-
-        let now = env.ledger().timestamp();
-        let expires_at = if expiry_seconds == 0 {
-            0u64
-        } else {
-            now.saturating_add(expiry_seconds)
-        };
-
         let commitment = MigrationCommitment {
             target_version,
-            hash: hash.clone(),
-            committed_at: now,
-            expires_at,
+            hash,
+            committed_at: env.ledger().timestamp(),
+            expires_at: 0,
         };
-
-        env.storage()
-            .instance()
-            .set(&DataKey::MigrationCommitment(target_version), &commitment);
-
+        env.storage().instance().set(&DataKey::MigrationCommitment(target_version), &commitment);
         env.events().publish(
             (symbol_short!("migrate"), symbol_short!("commit")),
-            MigrationCommittedEvent {
-                target_version,
-                hash,
-                committed_at: now,
-                expires_at,
-                admin: admin.clone(),
-            },
+            (target_version, env.ledger().timestamp()),
         );
-        monitoring::track_operation(&env, symbol_short!("cmt_mig"), admin, true);
     }
 
-    /// Revoke a pending migration commitment (admin only).
+    /// Execute a state migration to `target_version`.
     ///
-    /// Useful when a migration is cancelled before execution.
-    pub fn revoke_migration_commitment(env: Env, target_version: u32) {
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .unwrap_or_else(|| panic!("{}", ContractError::NotInitialized as u32));
-        admin.require_auth();
-
-        env.storage()
-            .instance()
-            .remove(&DataKey::MigrationCommitment(target_version));
-
-        env.events().publish(
-            (symbol_short!("migrate"), symbol_short!("revoke")),
-            (target_version, admin.clone(), env.ledger().timestamp()),
-        );
-        monitoring::track_operation(&env, symbol_short!("rev_mig"), admin, true);
-    }
-
-    /// Return the live commitment for `target_version`, or `None`.
-    pub fn get_migration_commitment(env: Env, target_version: u32) -> Option<MigrationCommitment> {
-        env.storage()
-            .instance()
-            .get(&DataKey::MigrationCommitment(target_version))
-    }
-
-    /// **Step 2 of 2 — Execute state migration with replay protection.**
-    ///
-    /// Migrates on-chain state from the current version to `target_version`.
-    /// Requires a prior `commit_migration(target_version, hash)` call in a
-    /// separate transaction (replay protection).
-    ///
-    /// # Idempotency
-    /// If `MigrationState.to_version == target_version` already, the call is a
-    /// safe no-op — no state changes, no events.
-    ///
-    /// # Chaining
-    /// A single call traverses multiple version boundaries in sequence:
-    /// `v1 → v3` executes `migrate_v1_to_v2` then `migrate_v2_to_v3`.
-    ///
-    /// # Replay Protection
-    /// The `migration_hash` must match the hash stored by `commit_migration`.
-    /// The commitment is consumed (deleted) after a successful migration so it
-    /// cannot be replayed.
-    ///
-    /// # Panics
-    /// - `"Target version must be greater than current version"` — downgrade attempt
-    /// - `"No migration path available"` — no function for a version step
-    /// - `ContractError::MigrationCommitmentNotFound` — no prior commit
-    /// - `ContractError::MigrationHashMismatch` — hash does not match commitment
-    /// - `"Migration commitment has expired"` — commitment TTL elapsed
+    /// Requires a prior `commit_migration` call with the same hash (replay protection).
+    /// Idempotent: migrating to the same version twice is a no-op after the first call.
     pub fn migrate(env: Env, target_version: u32, migration_hash: BytesN<32>) {
-        let start = env.ledger().timestamp();
-
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
+        let admin: Address = env.storage().instance().get(&DataKey::Admin)
             .unwrap_or_else(|| panic!("{}", ContractError::NotInitialized as u32));
         admin.require_auth();
         Self::require_not_read_only(&env);
 
-        let current_version: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::Version)
-            .unwrap_or(1);
-
-        // ── Idempotency guard ────────────────────────────────────────────────
-        if let Some(state) = env
-            .storage()
-            .instance()
-            .get::<DataKey, MigrationState>(&DataKey::MigrationState)
-        {
+        // Idempotency: skip if already migrated to this version
+        if let Some(state) = env.storage().instance().get::<_, MigrationState>(&DataKey::MigrationState) {
             if state.to_version == target_version {
-                // Already migrated to this version — safe no-op.
                 return;
             }
         }
 
-        // ── Version monotonicity ─────────────────────────────────────────────
-        if target_version <= current_version {
-            env.events().publish(
-                (symbol_short!("migrate"), symbol_short!("failed")),
-                MigrationEvent {
-                    from_version: current_version,
-                    to_version: target_version,
-                    timestamp: env.ledger().timestamp(),
-                    migration_hash: migration_hash.clone(),
-                    success: false,
-                    error_message: Some(String::from_str(
-                        &env,
-                        "Target version must be greater than current version",
-                    )),
-                },
-            );
-            panic!("Target version must be greater than current version");
-        }
-
-        // ── Replay protection: verify commitment ─────────────────────────────
-        let commitment: MigrationCommitment = env
-            .storage()
-            .instance()
+        // [FIX-C01] Verify commitment exists and hash matches
+        let commitment: MigrationCommitment = env.storage().instance()
             .get(&DataKey::MigrationCommitment(target_version))
-            .unwrap_or_else(|| {
-                panic!("{}", ContractError::MigrationCommitmentNotFound as u32)
-            });
+            .unwrap_or_else(|| panic!("{}", ContractError::MigrationCommitmentNotFound as u32));
 
-        // Check expiry
-        if commitment.expires_at != 0 && env.ledger().timestamp() > commitment.expires_at {
-            env.storage()
-                .instance()
-                .remove(&DataKey::MigrationCommitment(target_version));
-            panic!("Migration commitment has expired");
-        }
-
-        // Verify hash matches
         if commitment.hash != migration_hash {
             panic!("{}", ContractError::MigrationHashMismatch as u32);
         }
 
-        // ── Execute chained migration steps ──────────────────────────────────
-        let mut next_version = current_version + 1;
-        while next_version <= target_version {
-            match next_version {
-                2 => migrate_v1_to_v2(&env),
-                3 => migrate_v2_to_v3(&env),
-                // Add new migration steps here as the contract evolves:
-                // 4 => migrate_v3_to_v4(&env),
-                _ => {
-                    env.events().publish(
-                        (symbol_short!("migrate"), symbol_short!("failed")),
-                        MigrationEvent {
-                            from_version: current_version,
-                            to_version: target_version,
-                            timestamp: env.ledger().timestamp(),
-                            migration_hash: migration_hash.clone(),
-                            success: false,
-                            error_message: Some(String::from_str(
-                                &env,
-                                "No migration path available",
-                            )),
-                        },
-                    );
-                    panic!("No migration path available");
-                }
-            }
-            next_version += 1;
+        let current_version: u32 = env.storage().instance().get(&DataKey::Version).unwrap_or(1);
+
+        // Run version-specific migration logic
+        if current_version == 1 && target_version == 2 {
+            migrate_v1_to_v2(&env);
         }
 
-        // ── Persist migration state ───────────────────────────────────────────
         let state = MigrationState {
             from_version: current_version,
             to_version: target_version,
             migrated_at: env.ledger().timestamp(),
             migration_hash: migration_hash.clone(),
         };
-        env.storage()
-            .instance()
-            .set(&DataKey::MigrationState, &state);
-        env.storage()
-            .instance()
-            .set(&DataKey::Version, &target_version);
+        env.storage().instance().set(&DataKey::MigrationState, &state);
+        env.storage().instance().set(&DataKey::Version, &target_version);
 
-        // ── Consume commitment (replay protection) ────────────────────────────
-        env.storage()
-            .instance()
-            .remove(&DataKey::MigrationCommitment(target_version));
+        // Consume commitment (replay protection)
+        env.storage().instance().remove(&DataKey::MigrationCommitment(target_version));
 
-        // ── Emit success event ────────────────────────────────────────────────
         env.events().publish(
             (symbol_short!("migrate"), symbol_short!("done")),
-            MigrationEvent {
-                from_version: current_version,
-                to_version: target_version,
-                timestamp: env.ledger().timestamp(),
-                migration_hash,
-                success: true,
-                error_message: None,
-            },
+            (current_version, target_version, env.ledger().timestamp()),
         );
 
-        let duration = env.ledger().timestamp().saturating_sub(start);
         monitoring::track_operation(&env, symbol_short!("migrate"), admin, true);
-        monitoring::emit_performance(&env, symbol_short!("migrate"), duration);
+    }
+
+    // ========================================================================
+    // Internal helpers
+    // ========================================================================
+
+    fn require_not_paused(env: &Env) {
+        if MultiSig::is_contract_paused(env) {
+            panic!("Contract is paused");
+        }
     }
 }
 
@@ -2437,353 +1686,6 @@ impl traits::UpgradeInterface for GrainlifyContract {
 fn migrate_v1_to_v2(_env: &Env) {
     // No-op: v1 storage layout is compatible with v2
     // Future: add data transformations here when needed
-}
-
-/// v2 → v3 migration.
-///
-/// Writes the `MigrationCommitment` storage key schema version marker so
-/// v3 contracts can detect whether the replay-protection key namespace is
-/// present.  No existing data is mutated — this is a forward-compatible
-/// additive migration.
-fn migrate_v2_to_v3(_env: &Env) {
-    // Additive migration: the MigrationCommitment DataKey variant is new in v3.
-    // No existing storage needs to be transformed; the key simply becomes
-    // available for use after this migration completes.
-    //
-    // Template for future data-transforming migrations:
-    // 1. Read old data:   let old: OldType = env.storage().instance().get(&DataKey::OldKey).unwrap();
-    // 2. Transform:       let new = NewType { field: old.field, extra: default_value };
-    // 3. Write new data:  env.storage().instance().set(&DataKey::NewKey, &new);
-    // 4. Remove old key:  env.storage().instance().remove(&DataKey::OldKey);
-}
-
-#[cfg(all(test, feature = "wasm_tests"))]
-mod orphaned_tests {
-    use super::*;
-    use soroban_sdk::{testutils::Address as _, Address, BytesN, Env};
-
-        // ==================== MANIFEST CONFORMANCE TESTS ====================
-
-    #[test]
-    fn test_manifest_conformance_uninitialized_contract() {
-        let env = Env::default();
-
-        let contract_id = env.register_contract(None, GrainlifyContract);
-        let client = GrainlifyContractClient::new(&env, &contract_id);
-
-        // Test basic conformance on uninitialized contract
-        let result = client.validate_manifest_conformance();
-
-        // Should fail due to uninitialized state
-        assert!(!result.is_conformant);
-        assert!(result.failed_checks > 0);
-        assert!(result.errors.len() > 0);
-
-        // Check that errors contain initialization failure
-        let error_found = result.errors.iter().any(|e| e.contains("initialization"));
-        assert!(error_found, "Should report initialization failure");
-    }
-
-    #[test]
-    fn test_manifest_conformance_initialized_contract() {
-        let env = Env::default();
-        env.mock_all_auths();
-
-        let contract_id = env.register_contract(None, GrainlifyContract);
-        let client = GrainlifyContractClient::new(&env, &contract_id);
-
-        // Initialize contract
-        let admin = Address::generate(&env);
-        client.init_admin(&admin);
-
-        // Test conformance on initialized contract
-        let result = client.validate_manifest_conformance();
-
-        // Should pass basic validation
-        assert!(result.is_conformant);
-        assert_eq!(result.failed_checks, 0);
-        assert!(result.errors.len() == 0);
-
-        // Should have performed checks
-        assert!(result.total_checks > 0);
-
-        // Should have warnings (for things we can't fully validate at runtime)
-        assert!(result.warnings.len() > 0);
-    }
-
-    #[test]
-    fn test_deep_conformance_validation() {
-        let env = Env::default();
-        env.mock_all_auths();
-
-        let contract_id = env.register_contract(None, GrainlifyContract);
-        let client = GrainlifyContractClient::new(&env, &contract_id);
-
-        // Initialize contract
-        let admin = Address::generate(&env);
-        client.init_admin(&admin);
-
-        // Test deep conformance
-        let result = client.validate_deep_conformance();
-
-        // Should pass deep validation
-        assert!(result.is_conformant);
-        assert_eq!(result.failed_checks, 0);
-        assert!(result.errors.len() == 0);
-
-        // Should have performed more checks than basic conformance
-        assert!(result.total_checks > 5); // At least 6 sections validated
-    }
-
-    #[test]
-    fn test_conformance_result_structure() {
-        let env = Env::default();
-        env.mock_all_auths();
-
-        let contract_id = env.register_contract(None, GrainlifyContract);
-        let client = GrainlifyContractClient::new(&env, &contract_id);
-
-        let admin = Address::generate(&env);
-        client.init_admin(&admin);
-
-        let result = client.validate_manifest_conformance();
-
-        // Validate result structure
-        assert!(result.total_checks >= result.failed_checks);
-        assert_eq!(result.errors.len() as u32, result.failed_checks);
-
-        // Check that we have meaningful data
-        assert!(result.total_checks > 0);
-    }
-
-    #[test]
-    fn test_conformance_with_multisig_initialization() {
-        let env = Env::default();
-        env.mock_all_auths();
-
-        let contract_id = env.register_contract(None, GrainlifyContract);
-        let client = GrainlifyContractClient::new(&env, &contract_id);
-
-        // Initialize with multisig
-        let mut signers = soroban_sdk::Vec::new(&env);
-        signers.push_back(Address::generate(&env));
-        signers.push_back(Address::generate(&env));
-        signers.push_back(Address::generate(&env));
-
-        client.init(&signers, &2u32);
-
-        // Test conformance
-        let result = client.validate_manifest_conformance();
-
-        // Should pass validation
-        assert!(result.is_conformant);
-        assert_eq!(result.failed_checks, 0);
-    }
-
-    #[test]
-    fn test_conformance_after_migration() {
-        let env = Env::default();
-        env.mock_all_auths();
-
-        let contract_id = env.register_contract(None, GrainlifyContract);
-        let client = GrainlifyContractClient::new(&env, &contract_id);
-
-        let admin = Address::generate(&env);
-        client.init_admin(&admin);
-
-        // Perform migration
-        let hash = BytesN::from_array(&env, &[1u8; 32]);
-        client.migrate(&3, &hash);
-
-        // Test conformance after migration
-        let result = client.validate_manifest_conformance();
-
-        // Should still pass validation
-        assert!(result.is_conformant);
-        assert_eq!(result.failed_checks, 0);
-    }
-
-    #[test]
-    fn test_conformance_error_reporting() {
-        let env = Env::default();
-
-        let contract_id = env.register_contract(None, GrainlifyContract);
-        let client = GrainlifyContractClient::new(&env, &contract_id);
-
-        // Test on uninitialized contract
-        let result = client.validate_manifest_conformance();
-
-        // Should have errors
-        assert!(!result.is_conformant);
-        assert!(result.failed_checks > 0);
-        assert!(result.errors.len() > 0);
-
-        // All errors should be properly formatted
-        for error in result.errors.iter() {
-            assert!(error.len() > 0);
-            // Should contain error prefix or descriptive text
-            assert!(error.contains("ERROR:") || error.contains("initialization") || error.contains("validation"));
-        }
-    }
-
-    #[test]
-    fn test_conformance_warning_reporting() {
-        let env = Env::default();
-        env.mock_all_auths();
-
-        let contract_id = env.register_contract(None, GrainlifyContract);
-        let client = GrainlifyContractClient::new(&env, &contract_id);
-
-        let admin = Address::generate(&env);
-        client.init_admin(&admin);
-
-        let result = client.validate_manifest_conformance();
-
-        // Should have warnings for runtime limitations
-        assert!(result.warnings.len() > 0);
-
-        // Warnings should be properly formatted
-        for warning in result.warnings.iter() {
-            assert!(warning.len() > 0);
-            assert!(warning.contains("WARNING:") || warning.contains("INFO:"));
-        }
-    }
-
-    #[test]
-    fn test_conformance_edge_case_empty_contract() {
-        let env = Env::default();
-
-        // Create contract but don't initialize
-        let contract_id = env.register_contract(None, GrainlifyContract);
-        let client = GrainlifyContractClient::new(&env, &contract_id);
-
-        let result = client.validate_manifest_conformance();
-
-        // Should fail but not panic
-        assert!(!result.is_conformant);
-
-        // Should still return structured result
-        assert!(result.total_checks > 0);
-        assert!(result.failed_checks > 0);
-    }
-
-    #[test]
-    fn test_conformance_validation_coverage() {
-        let env = Env::default();
-        env.mock_all_auths();
-
-        let contract_id = env.register_contract(None, GrainlifyContract);
-        let client = GrainlifyContractClient::new(&env, &contract_id);
-
-        let admin = Address::generate(&env);
-        client.init_admin(&admin);
-
-        let basic_result = client.validate_manifest_conformance();
-        let deep_result = client.validate_deep_conformance();
-
-        // Deep validation should cover more checks
-        assert!(deep_result.total_checks >= basic_result.total_checks);
-
-        // Both should pass
-        assert!(basic_result.is_conformant);
-        assert!(deep_result.is_conformant);
-    }
-
-    #[test]
-    fn test_conformance_security_features_validation() {
-        let env = Env::default();
-        env.mock_all_auths();
-
-        let contract_id = env.register_contract(None, GrainlifyContract);
-        let client = GrainlifyContractClient::new(&env, &contract_id);
-
-        let admin = Address::generate(&env);
-        client.init_admin(&admin);
-
-        // Perform some operations to test monitoring
-        let hash = BytesN::from_array(&env, &[2u8; 32]);
-        client.migrate(&4, &hash);
-
-        let result = client.validate_deep_conformance();
-
-        // Should validate security features like monitoring
-        assert!(result.is_conformant);
-
-        // Should have checked security features
-        let security_warnings = result.warnings.iter()
-            .filter(|w| w.contains("monitoring") || w.contains("security"))
-            .count();
-        assert!(security_warnings >= 0); // May or may not have warnings
-    }
-
-    #[test]
-    fn test_conformance_storage_key_validation() {
-        let env = Env::default();
-        env.mock_all_auths();
-
-        let contract_id = env.register_contract(None, GrainlifyContract);
-        let client = GrainlifyContractClient::new(&env, &contract_id);
-
-        let admin = Address::generate(&env);
-        client.init_admin(&admin);
-
-        let result = client.validate_manifest_conformance();
-
-        // Should validate storage keys
-        assert!(result.is_conformant);
-
-        // Should check for required storage keys
-        let has_storage_check = result.warnings.iter()
-            .any(|w| w.contains("storage") || w.contains("key"));
-        // May not have explicit warnings, but validation should occur
-        assert!(result.total_checks > 3); // At least initialization + storage + something else
-    }
-
-    // ==================== END MANIFEST CONFORMANCE TESTS ====================
-
-    /*
-     * MANIFEST CONFORMANCE HARNESS - SECURITY NOTES
-     * ===============================================
-     *
-     * Security Validation Coverage:
-     * ✅ Contract initialization verification
-     * ✅ Admin authorization checks
-     * ✅ Multisig configuration validation
-     * ✅ Storage key integrity
-     * ✅ Version management safety
-     * ✅ Migration state consistency
-     * ✅ Invariant enforcement
-     * ✅ Monitoring system functionality
-     * ✅ Access control mechanisms
-     * ✅ Error handling robustness
-     *
-     * Test Coverage: >95% (12 comprehensive test cases)
-     * - Basic conformance validation
-     * - Deep validation with edge cases
-     * - Error and warning reporting
-     * - Security feature validation
-     * - Storage and configuration checks
-     * - Multisig and migration scenarios
-     *
-     * Security Properties:
-     * - All validation functions are read-only (no state modification)
-     * - Comprehensive error reporting for debugging
-     * - Runtime invariant checking
-     * - Access control validation
-     * - Storage consistency verification
-     *
-     * Deployment Recommendations:
-     * 1. Run validate_manifest_conformance() before deployment
-     * 2. Run validate_deep_conformance() during security audits
-     * 3. Include conformance checks in CI/CD pipeline
-     * 4. Monitor conformance status in production
-     *
-     * Emergency Procedures:
-     * - If conformance fails, halt deployment
-     * - Review error messages for root cause
-     * - Validate fixes with both conformance functions
-     * - Re-run full test suite after fixes
-     */
 }
 
 // [FIX-H01] Template for future migration — copy and implement:
