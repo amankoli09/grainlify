@@ -1663,7 +1663,18 @@ impl ProgramEscrowContract {
     // Idempotency Key Management
     // ========================================================================
 
-    /// Validate idempotency key format and constraints
+    /// Validate idempotency key format and constraints.
+    ///
+    /// # Key Format Convention (Client SDK)
+    /// Recommended format: `{program_id}-{payout_type}-{recipient_prefix}-{nonce}`
+    /// - `program_id`: on-chain program identifier (namespace isolation)
+    /// - `payout_type`: `single` or `batch`
+    /// - `recipient_prefix`: first 8 chars of the Stellar address
+    /// - `nonce`: 16-char hex string from 8 cryptographically random bytes
+    ///
+    /// Example: `hackathon-2024-single-GABC1234-a3f1c2d4e5b6a7f8`
+    ///
+    /// See `docs/program-escrow/idempotency-key-client-guide.md` for full details.
     fn validate_idempotency_key(idempotency_key: &String) {
         if idempotency_key.is_empty() {
             panic!("Idempotency key cannot be empty");
