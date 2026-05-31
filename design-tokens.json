@@ -126,6 +126,92 @@
       "border": "1px solid rgba(255 255 255 / 0.2)"
     }
   },
+  "motion": {
+    "durations": {
+      "instant": "0ms",
+      "fast": "150ms",
+      "normal": "300ms",
+      "slow": "500ms",
+      "slower": "800ms",
+      "slowest": "1200ms"
+    },
+    "easing": {
+      "easeOut": [0, 0, 0.2, 1],
+      "easeIn": [0.4, 0, 1, 1],
+      "easeInOut": [0.4, 0, 0.2, 1],
+      "easeOutString": "cubic-bezier(0, 0, 0.2, 1)",
+      "easeInString": "cubic-bezier(0.4, 0, 1, 1)",
+      "easeInOutString": "cubic-bezier(0.4, 0, 0.2, 1)"
+    },
+    "pageTransition": {
+      "default": {
+        "duration": "300ms",
+        "easing": "easeOut",
+        "effect": "fade-slide"
+      },
+      "modal": {
+        "duration": "300ms",
+        "easing": "easeOut",
+        "effect": "scale-fade"
+      },
+      "dropdown": {
+        "duration": "150ms",
+        "easing": "easeOut",
+        "effect": "slide-fade"
+      }
+    },
+    "componentInteractions": {
+      "cardHover": {
+        "duration": "150ms",
+        "scale": 1.02,
+        "shadowElevation": "xl"
+      },
+      "buttonHover": {
+        "duration": "150ms",
+        "scale": 1.02
+      },
+      "inputFocus": {
+        "duration": "200ms",
+        "glowIntensity": "0.1"
+      }
+    },
+    "listAnimation": {
+      "staggerDelay": "50ms",
+      "itemDuration": "300ms",
+      "initialDelay": "100ms",
+      "maxStaggerItems": 12,
+      "skipStaggerThreshold": 12
+    },
+    "skeletonShimmer": {
+      "duration": "1200ms",
+      "timing": "linear",
+      "contrast": "low",
+      "direction": "left-to-right"
+    },
+    "reducedMotionFallback": {
+      "pageTransition": "instant",
+      "cardHover": "opacity",
+      "listAnimation": "instant",
+      "skeletonShimmer": "static"
+    },
+    "responsive": {
+      "sm": {
+        "durationAdjustment": "-25%",
+        "staggerDelay": "30ms",
+        "notes": "Mobile optimization"
+      },
+      "md": {
+        "durationAdjustment": "-10%",
+        "staggerDelay": "40ms",
+        "notes": "Tablet optimization"
+      },
+      "lg": {
+        "durationAdjustment": "0%",
+        "staggerDelay": "50ms",
+        "notes": "Desktop default"
+      }
+    }
+  },
   "animation": {
     "duration": {
       "fast": "150ms",
